@@ -1,0 +1,28 @@
+Package: bllnn
+Type: Package
+Title: Bayesian Last Layer Neural Networks as Composable Gibbs Blocks
+Version: 0.0.0.9000
+Authors@R: c(
+    person("Saptarshi", "Niyogi",
+           email = "suvo123123@gmail.com",
+           role = c("aut", "cre", "cph")),
+    person("Saptarshi", "Chakraborty",
+           role = "aut"))
+Description: Exposes a Bayesian Last Layer neural network as a composable
+    conditional-model block for user-written Gibbs samplers, in the spirit of
+    'dbarts' for Bayesian Additive Regression Trees. The caller supplies a
+    residual and a noise level and receives one honest posterior draw of the
+    nonlinear function. Intended for partial-linear causal inference where the
+    linear coefficient requires an honest credible interval.
+License: GPL-3
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+LinkingTo:
+    Rcpp,
+    RcppArmadillo
+Imports:
+    Rcpp
+Suggests:
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.0
