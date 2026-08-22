@@ -1,5 +1,7 @@
 ^CLAUDE\.md$
+^CLAUDE\.md_old$
 ^\.claude$
 ^.*\.Rproj$
 ^\.Rproj\.user$
 ^\.github$
+^SESSION_PROTOCOL\.md$
