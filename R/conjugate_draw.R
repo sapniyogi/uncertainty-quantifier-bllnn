@@ -44,20 +44,56 @@ conjugate_moments <- function(Phi, r, sigma, tau2) {
   }
 
   m <- ncol(Phi)
+  conjugate_moments_core(crossprod(Phi), crossprod(Phi, r), diag(m) / tau2,
+                         sigma)
+}
 
+#' Posterior moments from precomputed pieces
+#'
+#' The formula itself, separated from the work of deriving its inputs. This is
+#' the single place the conjugate identity is written down: `conjugate_moments()`
+#' calls it after computing the cross-products from scratch, and
+#' [gibbs_step()] calls it with the ones cached on the sampler object. Keeping
+#' one copy is what stops the sampler and the reference function drifting apart
+#' as the fast path is optimised.
+#'
+#' @param cross `Phi'Phi`, an `m` x `m` matrix.
+#' @param Phi_r `Phi'r`, a length-`m` vector or `m` x 1 matrix.
+#' @param prior_precision `I / tau2`, an `m` x `m` matrix.
+#' @param sigma Noise standard deviation.
+#'
+#' @return A list with `mean`, `cov` and `precision`.
+#'
+#' @noRd
+conjugate_moments_core <- function(cross, Phi_r, prior_precision, sigma) {
   # Posterior precision: A = Phi'Phi / sigma^2 + I / tau2.
   # The I / tau2 term keeps A positive definite even when m > n, so this is
   # well defined where ordinary least squares is not.
-  precision <- crossprod(Phi) / sigma^2 + diag(m) / tau2
+  precision <- cross / sigma^2 + prior_precision
 
   covariance <- solve(precision)
   # solve() returns a matrix that is symmetric only up to rounding; chol() is
   # strict about that, so symmetrise before it is used as a covariance.
   covariance <- (covariance + t(covariance)) / 2
 
-  mu <- as.vector(covariance %*% (crossprod(Phi, r) / sigma^2))
+  mu <- as.vector(covariance %*% (Phi_r / sigma^2))
 
   list(mean = mu, cov = covariance, precision = precision)
+}
+
+#' Transform a standard normal vector by the posterior moments
+#'
+#' `V = R'R` with `R` upper triangular, so `t(R) %*% z` has covariance
+#' `t(R) I R = R'R = V`. Shared by [conjugate_draw()] and [gibbs_step()] so the
+#' Cholesky orientation is written once.
+#'
+#' @noRd
+draw_from_moments <- function(post, nm = NULL) {
+  R <- chol(post$cov)
+  z <- stats::rnorm(length(post$mean))
+  w <- as.vector(post$mean + t(R) %*% z)
+  names(w) <- nm
+  w
 }
 
 #' One exact draw of the last-layer weights
@@ -121,13 +157,5 @@ conjugate_moments <- function(Phi, r, sigma, tau2) {
 #' @export
 conjugate_draw <- function(Phi, r, sigma, tau2) {
   post <- conjugate_moments(Phi, r, sigma, tau2)
-
-  # V = R'R with R upper triangular, so t(R) %*% z has covariance
-  # t(R) I R = R'R = V, as required.
-  R <- chol(post$cov)
-  z <- stats::rnorm(length(post$mean))
-
-  w <- as.vector(post$mean + t(R) %*% z)
-  names(w) <- colnames(Phi)
-  w
+  draw_from_moments(post, colnames(Phi))
 }
