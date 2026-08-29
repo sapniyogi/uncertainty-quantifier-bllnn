@@ -5,14 +5,21 @@
 \alias{print.bllnn_sampler}
 \title{Build a last-layer Gibbs sampler block}
 \usage{
-bllnn_sampler(Phi, tau2, posterior = "conjugate", features = "frozen")
+bllnn_sampler(
+  Phi,
+  tau2,
+  posterior = "conjugate",
+  features = "frozen",
+  data = NULL
+)
 
 \method{print}{bllnn_sampler}(x, ...)
 }
 \arguments{
-\item{Phi}{Frozen feature matrix, \code{n} x \code{m}. Learned once on a held-out
-fold and fixed; this object does not check that, but the exactness of the
-draw depends on it.}
+\item{Phi}{Frozen feature matrix, \code{n} x \code{m}, or a \code{bllnn_body} from
+\code{\link[=bllnn_warmup]{bllnn_warmup()}} together with \code{data}. Features are learned once on a
+held-out fold and then fixed; this object does not check that, but the
+exactness of the draw depends on it.}
 
 \item{tau2}{Prior variance of each weight, a single positive number. The
 prior is \verb{w ~ N(0, tau2 I)}.}
@@ -23,6 +30,9 @@ implemented; the other names in \code{\link[=valid_kernels]{valid_kernels()}} ar
 
 \item{features}{Whether features stay fixed during sampling. Only
 \code{"frozen"} gives a valid kernel.}
+
+\item{data}{Predictors to evaluate the features on. Required when \code{Phi} is a
+\code{bllnn_body}, and not permitted otherwise.}
 
 \item{x}{A \code{bllnn_sampler} object.}
 

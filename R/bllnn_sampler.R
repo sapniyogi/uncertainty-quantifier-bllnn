@@ -67,9 +67,12 @@ stop_if_not_sampler <- function(mod) {
 #' [set_sigma()] and never estimated here. Estimating it internally would use
 #' the data twice and break the joint chain.
 #'
-#' @param Phi Frozen feature matrix, `n` x `m`. Learned once on a held-out
-#'   fold and fixed; this object does not check that, but the exactness of the
-#'   draw depends on it.
+#' @param Phi Frozen feature matrix, `n` x `m`, or a `bllnn_body` from
+#'   [bllnn_warmup()] together with `data`. Features are learned once on a
+#'   held-out fold and then fixed; this object does not check that, but the
+#'   exactness of the draw depends on it.
+#' @param data Predictors to evaluate the features on. Required when `Phi` is a
+#'   `bllnn_body`, and not permitted otherwise.
 #' @param tau2 Prior variance of each weight, a single positive number. The
 #'   prior is `w ~ N(0, tau2 I)`.
 #' @param posterior Which posterior to draw from. Only `"conjugate"` is
@@ -97,9 +100,20 @@ stop_if_not_sampler <- function(mod) {
 #'   [is_valid_kernel()]
 #' @export
 bllnn_sampler <- function(Phi, tau2, posterior = "conjugate",
-                          features = "frozen") {
+                          features = "frozen", data = NULL) {
+  if (inherits(Phi, "bllnn_body")) {
+    if (is.null(data)) {
+      stop("When `Phi` is a bllnn_body, supply `data` so the frozen features ",
+           "can be evaluated on it.", call. = FALSE)
+    }
+    Phi <- feature_matrix(Phi, data)
+  } else if (!is.null(data)) {
+    stop("`data` applies only when `Phi` is a bllnn_body. Pass the feature ",
+         "matrix alone, or pass a body and its data.", call. = FALSE)
+  }
   if (!is.matrix(Phi) || !is.numeric(Phi)) {
-    stop("`Phi` must be a numeric matrix.", call. = FALSE)
+    stop("`Phi` must be a numeric matrix, or a bllnn_body with `data`.",
+         call. = FALSE)
   }
   if (anyNA(Phi)) {
     stop("`Phi` must not contain NA.", call. = FALSE)
