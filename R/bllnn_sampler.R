@@ -101,7 +101,13 @@ stop_if_not_sampler <- function(mod) {
 #' @export
 bllnn_sampler <- function(Phi, tau2, posterior = "conjugate",
                           features = "frozen", data = NULL) {
-  if (inherits(Phi, "bllnn_body")) {
+  if (inherits(Phi, "bllnn_crossfit")) {
+    if (!is.null(data)) {
+      stop("A bllnn_crossfit already carries its features, so `data` is not ",
+           "accepted.", call. = FALSE)
+    }
+    Phi <- feature_matrix(Phi)
+  } else if (inherits(Phi, "bllnn_body")) {
     if (is.null(data)) {
       stop("When `Phi` is a bllnn_body, supply `data` so the frozen features ",
            "can be evaluated on it.", call. = FALSE)

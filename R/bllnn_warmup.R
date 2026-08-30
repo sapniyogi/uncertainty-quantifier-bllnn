@@ -306,31 +306,18 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
   ), class = "bllnn_body")
 }
 
-#' Frozen features from a warmed-up body
+#' @details
+#' For a `bllnn_body` this applies the stored standardisation and returns the
+#' hidden activations with a leading intercept column, plus one confounding
+#' channel per linear term if the body was warmed up with any.
 #'
-#' Applies the stored standardisation and returns the hidden activations with a
-#' leading intercept column. This is the matrix [bllnn_sampler()] draws a last
-#' layer over.
-#'
-#' @param body A `bllnn_body` from [bllnn_warmup()].
-#' @param newdata Predictor matrix or data frame with the same columns used in
-#'   training.
-#'
-#' @return A numeric matrix, `nrow(newdata)` x `(width + 1)`. The first column
-#'   is the intercept.
-#'
-#' @examples
-#' sim <- sim_partial_linear(n = 120, p_z = 5, seed = 1)
-#' r <- sim$data$y - as.vector(sim$X %*% sim$beta)
-#' body <- bllnn_warmup(sim$Z, r, width = 10, epochs = 200, seed = 1)
-#' Phi <- feature_matrix(body, sim$Z)
-#' dim(Phi)
-#'
+#' @rdname feature_matrix
 #' @export
-feature_matrix <- function(body, newdata) {
-  if (!inherits(body, "bllnn_body")) {
-    stop("`body` must be a bllnn_body, as returned by bllnn_warmup().",
-         call. = FALSE)
+feature_matrix.bllnn_body <- function(object, newdata = NULL, ...) {
+  body <- object
+  if (is.null(newdata)) {
+    stop("`newdata` is required: a bllnn_body stores the map, not the data ",
+         "it was trained on.", call. = FALSE)
   }
   if (is.data.frame(newdata)) newdata <- as.matrix(newdata)
   if (!is.matrix(newdata) || !is.numeric(newdata)) {
