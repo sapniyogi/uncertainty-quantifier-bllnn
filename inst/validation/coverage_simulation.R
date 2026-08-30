@@ -28,6 +28,9 @@ CONFOUNDING <- 0.6
 N_OBS <- 500
 FOLDS <- 5
 WIDTH <- 20
+# Matches what the package defaults reach in practice. Raising this to 3000
+# alongside the better-fitting settings dropped coverage from 0.940 to 0.860:
+# a sharper f absorbs more of the linear term. Do not raise it in isolation.
 EPOCHS <- 600
 N_ITER <- 1200
 BURN <- 400

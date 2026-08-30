@@ -85,8 +85,11 @@ test_that("training reduces validation loss below the intercept-only fit", {
 
 test_that("the returned parameters are the best-validation ones, not the last", {
   case <- warmup_case()
+  # learn_rate is set high enough that validation loss turns inside the
+  # budget. At the default rate 600 epochs is still improving, and the test
+  # would be measuring convergence speed rather than checkpoint restore.
   body <- bllnn_warmup(case$Z, case$r, width = 40, epochs = 600,
-                       patience = 1e6, seed = 1)
+                       learn_rate = 0.03, patience = 1e6, seed = 1)
 
   # With patience effectively disabled the loop runs to the end, so if the
   # best epoch is earlier than the last, the returned parameters must come
@@ -170,8 +173,18 @@ test_that("feature_matrix shape and intercept column are as documented", {
   expect_true(all(Phi[, 1] == 1))
   expect_equal(colnames(Phi)[1], "intercept")
   expect_equal(colnames(Phi)[2], "h1")
-  # ReLU features are non-negative by construction.
-  expect_true(all(Phi[, -1] >= 0))
+
+  # Activation-specific ranges, each asked of the activation it belongs to
+  # rather than of whichever is currently the default.
+  relu_body <- bllnn_warmup(case$Z, case$r, width = 12, epochs = 200,
+                            activation = "relu", seed = 1)
+  expect_true(all(feature_matrix(relu_body, case$Z)[, -1] >= 0))
+
+  tanh_body <- bllnn_warmup(case$Z, case$r, width = 12, epochs = 200,
+                            activation = "tanh", seed = 1)
+  tanh_feat <- feature_matrix(tanh_body, case$Z)[, -1]
+  expect_true(all(abs(tanh_feat) < 1))
+  expect_true(any(tanh_feat < 0))
 })
 
 test_that("a fixed seed reproduces the body, and the caller stream survives", {
@@ -529,4 +542,97 @@ test_that("invalid widths are refused", {
   expect_error(bllnn_warmup(case$Z, case$r, width = c(5, 2.5)), "positive integer")
   expect_error(bllnn_warmup(case$Z, case$r, width = integer(0)), "positive integer")
   expect_error(bllnn_warmup(case$Z, case$r, width = c(5, NA)), "positive integer")
+})
+
+# --- defaults and tuning ----------------------------------------------------
+
+test_that("the shipped defaults are the ones that pass the coverage gate", {
+  # Deliberately NOT the settings that fit f best. A sweep over five problems
+  # found tanh / 0.003 / 0.1 fits f about 2.8 times closer on average, but
+  # under those settings the 100-dataset coverage simulation fell from 0.940
+  # to 0.860 with every miss below the truth: a sharper f absorbs more of the
+  # linear term. If someone "improves" these defaults, the coverage
+  # simulation is what has to be re-run, not the fit benchmark.
+  fm <- formals(bllnn_warmup)
+  expect_equal(eval(fm$activation)[1], "relu")
+  expect_equal(fm$learn_rate, 0.01)
+  expect_equal(fm$weight_decay, 0.01)
+  expect_equal(fm$epochs, 2000)
+  expect_false(eval(fm$tune))
+})
+
+test_that("the default settings are recorded on the body", {
+  case <- warmup_case(n = 150)
+  body <- bllnn_warmup(case$Z, case$r, width = 8, epochs = 150, seed = 1)
+
+  expect_equal(body$activation, "relu")
+  expect_equal(body$learn_rate, 0.01)
+  expect_equal(body$weight_decay, 0.01)
+  expect_false(body$tuned)
+  expect_null(body$tuning)
+})
+
+test_that("tuning picks the candidate with the lowest validation loss", {
+  case <- warmup_case(n = 200)
+  tuned <- bllnn_warmup(case$Z, case$r, width = 10, epochs = 250,
+                        tune = TRUE, seed = 1)
+
+  expect_true(tuned$tuned)
+  expect_equal(nrow(tuned$tuning), length(tuning_grid()))
+  expect_equal(sum(tuned$tuning$chosen), 1L)
+
+  # The selected row must be the minimum, and the reported settings must be
+  # the ones that row names -- otherwise the search and the returned body
+  # have come apart.
+  best <- which.min(tuned$tuning$val_loss)
+  expect_true(tuned$tuning$chosen[best])
+  expect_equal(tuned$val_loss, min(tuned$tuning$val_loss))
+  expect_equal(tuned$activation, tuned$tuning$activation[best])
+  expect_equal(tuned$learn_rate, tuned$tuning$learn_rate[best])
+  expect_equal(tuned$weight_decay, tuned$tuning$weight_decay[best])
+})
+
+test_that("tuning never does worse than the default on its own criterion", {
+  case <- warmup_case(n = 200)
+  plain <- bllnn_warmup(case$Z, case$r, width = 10, epochs = 250, seed = 1)
+  tuned <- bllnn_warmup(case$Z, case$r, width = 10, epochs = 250,
+                        tune = TRUE, seed = 1)
+
+  # The default settings are inside the grid, and every candidate is scored on
+  # the same split, so the search can only match or beat them.
+  expect_lte(tuned$val_loss, plain$val_loss + 1e-8)
+})
+
+test_that("every candidate is scored on the same validation split", {
+  # If the split were redrawn per candidate the search would reward a lucky
+  # split rather than good settings. The grid contains the defaults, so a
+  # tuned fit that happens to pick them must reproduce the untuned fit exactly.
+  case <- warmup_case(n = 150)
+  plain <- bllnn_warmup(case$Z, case$r, width = 6, epochs = 200,
+                        activation = "tanh", learn_rate = 0.003,
+                        weight_decay = 0.1, seed = 5)
+  tuned <- bllnn_warmup(case$Z, case$r, width = 6, epochs = 200,
+                        tune = TRUE, seed = 5)
+
+  row <- tuned$tuning[tuned$tuning$activation == "tanh" &
+                        tuned$tuning$learn_rate == 0.003 &
+                        tuned$tuning$weight_decay == 0.1, ]
+  expect_equal(nrow(row), 1L)
+  expect_equal(row$val_loss, plain$val_loss)
+})
+
+test_that("tuning reaches the auxiliary bodies too", {
+  case <- warmup_case(n = 150)
+  body <- bllnn_warmup(case$Z, case$r, linear = case$sim$X, width = 6,
+                       epochs = 150, tune = TRUE, seed = 1)
+
+  expect_true(body$tuned)
+  expect_true(body$aux[[1]]$tuned)
+  expect_equal(nrow(body$aux[[1]]$tuning), length(tuning_grid()))
+})
+
+test_that("tune is validated", {
+  case <- warmup_case(n = 60)
+  expect_error(bllnn_warmup(case$Z, case$r, tune = "yes"), "TRUE or FALSE")
+  expect_error(bllnn_warmup(case$Z, case$r, tune = NA), "TRUE or FALSE")
 })

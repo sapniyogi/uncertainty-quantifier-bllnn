@@ -194,8 +194,16 @@ test_that("cross-fitting fits f at least as well as a single split", {
   case <- cf_case(n = 400)
   truth <- case$f_true - mean(case$f_true)
 
-  cf <- bllnn_crossfit(case$Z, case$y, folds = 5, width = 25, epochs = 800,
-                       seed = 1)
+  # Both arms must converge, or the comparison measures which tolerates
+  # truncation better rather than which fits f better -- at 800 epochs with
+  # the default learning rate this assertion reverses for exactly that reason.
+  # A brisker learning rate than the package default is used deliberately, so
+  # the test isolates cross-fitting from the choice of default step size.
+  n_epochs <- 2000
+  lr <- 0.03
+
+  cf <- bllnn_crossfit(case$Z, case$y, folds = 5, width = 25,
+                       epochs = n_epochs, learn_rate = lr, seed = 1)
   Phi_cf <- feature_matrix(cf)
 
   # The honest comparison: a single 50/50 split, which is what we had before,
@@ -203,7 +211,15 @@ test_that("cross-fitting fits f at least as well as a single split", {
   set.seed(1)
   half <- sample(nrow(case$Z), nrow(case$Z) / 2)
   body <- bllnn_warmup(case$Z[half, , drop = FALSE], case$y[half],
-                       width = 25, epochs = 800, seed = 1)
+                       width = 25, epochs = n_epochs, learn_rate = lr,
+                       seed = 1)
+
+  # Guard the premise: if either arm hit the budget it was still improving,
+  # and the comparison below is not measuring what it claims to.
+  expect_lt(body$best_epoch, n_epochs)
+  for (k in seq_len(cf$n_folds)) {
+    expect_lt(cf$bodies[[k]]$best_epoch, n_epochs)
+  }
   Phi_split <- feature_matrix(body, case$Z[-half, , drop = FALSE])
 
   err_cf <- sqrt(mean((lm.fit(Phi_cf, truth)$fitted.values - truth)^2))

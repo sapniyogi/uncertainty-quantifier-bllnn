@@ -111,6 +111,73 @@ mlp_init <- function(p, widths, activation) {
   par
 }
 
+#' Train one network by full-batch Adam with decoupled weight decay
+#'
+#' Extracted from [bllnn_warmup()] so that several candidate settings can be
+#' fitted against one fixed validation split. Returns the parameters from the
+#' best-validation epoch, not the last.
+#'
+#' @noRd
+mlp_train <- function(X_tr, y_tr, X_va, y_va, widths, activation,
+                      learn_rate, weight_decay, epochs, patience) {
+  act_f <- activation_fun(activation)
+  act_d <- activation_grad(activation)
+
+  par <- mlp_init(ncol(X_tr), widths, activation)
+  m_state <- lapply(par, function(z) z * 0)
+  v_state <- lapply(par, function(z) z * 0)
+  beta1 <- 0.9; beta2 <- 0.999; eps <- 1e-8
+  decayed <- c(paste0("W", seq_along(widths)), "w_out")
+
+  best_val <- Inf
+  best_par <- par
+  best_epoch <- 0L
+  since_improved <- 0L
+  trace <- numeric(0)
+
+  for (t in seq_len(epochs)) {
+    lg <- mlp_loss_grad(par, X_tr, y_tr, act_f, act_d)
+    for (nm in names(par)) {
+      g <- lg$grad[[nm]]
+      if (nm %in% decayed && weight_decay > 0) g <- g + weight_decay * par[[nm]]
+      m_state[[nm]] <- beta1 * m_state[[nm]] + (1 - beta1) * g
+      v_state[[nm]] <- beta2 * v_state[[nm]] + (1 - beta2) * g^2
+      par[[nm]] <- par[[nm]] - learn_rate *
+        (m_state[[nm]] / (1 - beta1^t)) /
+        (sqrt(v_state[[nm]] / (1 - beta2^t)) + eps)
+    }
+
+    val_loss <- mean((mlp_forward(par, X_va, act_f)$yhat - y_va)^2)
+    trace <- c(trace, val_loss)
+    if (val_loss < best_val - 1e-10) {
+      best_val <- val_loss
+      best_par <- par
+      best_epoch <- t
+      since_improved <- 0L
+    } else {
+      since_improved <- since_improved + 1L
+      if (since_improved >= patience) break
+    }
+  }
+
+  list(par = best_par, val_loss = best_val, best_epoch = best_epoch,
+       trace = trace)
+}
+
+#' Candidate settings searched when `tune = TRUE`
+#'
+#' Eight points spanning the region that a sweep over five simulated problems
+#' found useful. Deliberately small: each candidate is a full training run.
+#'
+#' @noRd
+tuning_grid <- function() {
+  g <- expand.grid(activation = c("tanh", "relu"),
+                   learn_rate = c(0.003, 0.03),
+                   weight_decay = c(0.01, 0.1),
+                   stringsAsFactors = FALSE)
+  lapply(seq_len(nrow(g)), function(i) as.list(g[i, ]))
+}
+
 #' Learn a frozen network body
 #'
 #' Trains a network on a seed fold and freezes it. The activations of its last
@@ -132,6 +199,28 @@ mlp_init <- function(p, widths, activation) {
 #' validation loss, not the last epoch. That matters: without it the body
 #' interpolates the training fold, and generalisation gets monotonically worse
 #' with more epochs.
+#'
+#' **Defaults, and why they are not the best-fitting ones.** A sweep over
+#' eighteen settings and five simulated problems found `tanh` with
+#' `learn_rate = 0.003` and `weight_decay = 0.1` fits `f` far better than these
+#' defaults: on average 2.8 times closer, and up to 6 times on one problem.
+#' Those settings were nevertheless rejected, because fitting `f` better made
+#' the causal inference worse. Under them the 100-dataset coverage simulation
+#' fell from 0.940 to 0.860 against a nominal 0.95, with all fourteen misses
+#' entirely below the truth.
+#'
+#' The reason is that a sharper `f` absorbs more of the linear term, so the
+#' bias in the coefficient grew from -0.049 to -0.070 while the intervals
+#' narrowed. The intervals themselves stayed honest -- their width slightly
+#' exceeded the spread of the estimator across datasets -- so this is bias
+#' leaking through the confounding channel, not over-confidence. See
+#' `inst/validation/coverage_simulation.R`.
+#'
+#' Treat that as a live limitation rather than a settled trade-off: the
+#' defaults below pass the coverage gate, but they pass it partly because a
+#' looser fit leaves less of the linear term to absorb. `tune = TRUE` searches
+#' for the best validation loss, which is the right objective for prediction
+#' and, on this evidence, the wrong one for causal work.
 #'
 #' **Standardisation.** Predictors are centred and scaled using statistics
 #' computed here and stored on the object, so [feature_matrix()] applies the
@@ -166,12 +255,18 @@ mlp_init <- function(p, widths, activation) {
 #'   with 64 units then 32. The features handed to the sampler are the
 #'   activations of the last layer, so its size sets the number of features.
 #' @param epochs Maximum training epochs.
-#' @param activation `"relu"` or `"tanh"`.
+#' @param activation `"tanh"` or `"relu"`.
 #' @param learn_rate Adam step size.
-#' @param weight_decay Decoupled weight decay. `0` disables it. Values around
-#'   `0.01` help; large values such as `0.1` over-smooth and degrade the fit.
-#' @param validation Fraction of `x` held out to select the stopping epoch.
+#' @param weight_decay Decoupled weight decay, applied to the weight matrices
+#'   and the output vector but never to the biases. `0` disables it.
+#' @param validation Fraction of `x` held out to select the stopping epoch, and
+#'   to choose among candidates when `tune = TRUE`.
 #' @param patience Stop after this many epochs with no validation improvement.
+#' @param tune Search a small grid of activations, learning rates and weight
+#'   decays, keeping whichever minimises validation loss. Costs one training
+#'   run per candidate, currently eight, and multiplies again across the
+#'   auxiliary bodies when `linear` is supplied. Off by default for that
+#'   reason, not because the defaults are always right.
 #' @param seed Optional integer seed. The random number stream of the caller is
 #'   restored on exit.
 #'
@@ -191,7 +286,8 @@ mlp_init <- function(p, widths, activation) {
 bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
                          activation = c("relu", "tanh"),
                          learn_rate = 0.01, weight_decay = 0.01,
-                         validation = 0.25, patience = 300, seed = NULL) {
+                         validation = 0.25, patience = 300, tune = FALSE,
+                         seed = NULL) {
   activation <- match.arg(activation)
 
   if (is.data.frame(x)) x <- as.matrix(x)
@@ -248,6 +344,9 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
     stop("`validation` must be a single number strictly between 0 and 1.",
          call. = FALSE)
   }
+  if (!is.logical(tune) || length(tune) != 1 || is.na(tune)) {
+    stop("`tune` must be TRUE or FALSE.", call. = FALSE)
+  }
   if (nrow(x) < 4) {
     stop("`x` needs at least 4 rows to hold out a validation slice.",
          call. = FALSE)
@@ -281,45 +380,31 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
   X_tr <- X[-val_idx, , drop = FALSE]; y_tr <- y_c[-val_idx]
   X_va <- X[val_idx, , drop = FALSE];  y_va <- y_c[val_idx]
 
-  act_f <- activation_fun(activation)
-  act_d <- activation_grad(activation)
+  candidates <- if (isTRUE(tune)) tuning_grid() else
+    list(list(activation = activation, learn_rate = learn_rate,
+              weight_decay = weight_decay))
 
-  par <- mlp_init(p, widths, activation)
-  m_state <- lapply(par, function(z) z * 0)
-  v_state <- lapply(par, function(z) z * 0)
-  beta1 <- 0.9; beta2 <- 0.999; eps <- 1e-8
-  decayed <- c(paste0("W", seq_along(widths)), "w_out")
+  # Every candidate is scored on the same validation split AND from the same
+  # weight initialisation. Sharing the split alone is not enough: each fit
+  # consumes random numbers to initialise, so without re-seeding, later
+  # candidates would start from different weights and could win on a lucky
+  # initialisation rather than on better settings.
+  init_seed <- sample.int(.Machine$integer.max, 1L)
+  fits <- lapply(candidates, function(cand) {
+    set.seed(init_seed)
+    mlp_train(X_tr, y_tr, X_va, y_va, widths, cand$activation,
+              cand$learn_rate, cand$weight_decay, epochs, patience)
+  })
+  chosen <- which.min(vapply(fits, function(f) f$val_loss, numeric(1)))
+  fit <- fits[[chosen]]
+  activation <- candidates[[chosen]]$activation
+  learn_rate <- candidates[[chosen]]$learn_rate
+  weight_decay <- candidates[[chosen]]$weight_decay
 
-  best_val <- Inf
-  best_par <- par
-  best_epoch <- 0L
-  since_improved <- 0L
-  trace <- numeric(0)
-
-  for (t in seq_len(epochs)) {
-    lg <- mlp_loss_grad(par, X_tr, y_tr, act_f, act_d)
-    for (nm in names(par)) {
-      g <- lg$grad[[nm]]
-      if (nm %in% decayed && weight_decay > 0) g <- g + weight_decay * par[[nm]]
-      m_state[[nm]] <- beta1 * m_state[[nm]] + (1 - beta1) * g
-      v_state[[nm]] <- beta2 * v_state[[nm]] + (1 - beta2) * g^2
-      par[[nm]] <- par[[nm]] - learn_rate *
-        (m_state[[nm]] / (1 - beta1^t)) /
-        (sqrt(v_state[[nm]] / (1 - beta2^t)) + eps)
-    }
-
-    val_loss <- mean((mlp_forward(par, X_va, act_f)$yhat - y_va)^2)
-    trace <- c(trace, val_loss)
-    if (val_loss < best_val - 1e-10) {
-      best_val <- val_loss
-      best_par <- par
-      best_epoch <- t
-      since_improved <- 0L
-    } else {
-      since_improved <- since_improved + 1L
-      if (since_improved >= patience) break
-    }
-  }
+  best_par <- fit$par
+  best_val <- fit$val_loss
+  best_epoch <- fit$best_epoch
+  trace <- fit$trace
 
   # Auxiliary bodies for the confounding channel: one per linear term,
   # each estimating E[linear_j | x] on this same seed fold. Trained with
@@ -331,6 +416,7 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
                    epochs = epochs, activation = activation,
                    learn_rate = learn_rate, weight_decay = weight_decay,
                    validation = validation, patience = patience,
+                   tune = tune,
                    seed = if (is.null(seed)) NULL else seed + j)
     })
     names(aux) <- colnames(linear)
@@ -346,6 +432,18 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
     centre = centre,
     scale = scale_,
     y_centre = y_centre,
+    learn_rate = learn_rate,
+    weight_decay = weight_decay,
+    tuned = isTRUE(tune),
+    tuning = if (isTRUE(tune)) {
+      data.frame(
+        activation = vapply(candidates, `[[`, "", "activation"),
+        learn_rate = vapply(candidates, `[[`, 0, "learn_rate"),
+        weight_decay = vapply(candidates, `[[`, 0, "weight_decay"),
+        val_loss = vapply(fits, function(f) f$val_loss, numeric(1)),
+        chosen = seq_along(fits) == chosen,
+        stringsAsFactors = FALSE)
+    } else NULL,
     val_loss = best_val,
     best_epoch = best_epoch,
     epochs_run = length(trace),

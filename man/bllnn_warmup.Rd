@@ -16,6 +16,7 @@ bllnn_warmup(
   weight_decay = 0.01,
   validation = 0.25,
   patience = 300,
+  tune = FALSE,
   seed = NULL
 )
 
@@ -39,16 +40,23 @@ activations of the last layer, so its size sets the number of features.}
 
 \item{epochs}{Maximum training epochs.}
 
-\item{activation}{\code{"relu"} or \code{"tanh"}.}
+\item{activation}{\code{"tanh"} or \code{"relu"}.}
 
 \item{learn_rate}{Adam step size.}
 
-\item{weight_decay}{Decoupled weight decay. \code{0} disables it. Values around
-\code{0.01} help; large values such as \code{0.1} over-smooth and degrade the fit.}
+\item{weight_decay}{Decoupled weight decay, applied to the weight matrices
+and the output vector but never to the biases. \code{0} disables it.}
 
-\item{validation}{Fraction of \code{x} held out to select the stopping epoch.}
+\item{validation}{Fraction of \code{x} held out to select the stopping epoch, and
+to choose among candidates when \code{tune = TRUE}.}
 
 \item{patience}{Stop after this many epochs with no validation improvement.}
+
+\item{tune}{Search a small grid of activations, learning rates and weight
+decays, keeping whichever minimises validation loss. Costs one training
+run per candidate, currently eight, and multiplies again across the
+auxiliary bodies when \code{linear} is supplied. Off by default for that
+reason, not because the defaults are always right.}
 
 \item{seed}{Optional integer seed. The random number stream of the caller is
 restored on exit.}
@@ -78,6 +86,28 @@ validation; the parameters returned are those from the epoch with the best
 validation loss, not the last epoch. That matters: without it the body
 interpolates the training fold, and generalisation gets monotonically worse
 with more epochs.
+
+\strong{Defaults, and why they are not the best-fitting ones.} A sweep over
+eighteen settings and five simulated problems found \code{tanh} with
+\code{learn_rate = 0.003} and \code{weight_decay = 0.1} fits \code{f} far better than these
+defaults: on average 2.8 times closer, and up to 6 times on one problem.
+Those settings were nevertheless rejected, because fitting \code{f} better made
+the causal inference worse. Under them the 100-dataset coverage simulation
+fell from 0.940 to 0.860 against a nominal 0.95, with all fourteen misses
+entirely below the truth.
+
+The reason is that a sharper \code{f} absorbs more of the linear term, so the
+bias in the coefficient grew from -0.049 to -0.070 while the intervals
+narrowed. The intervals themselves stayed honest -- their width slightly
+exceeded the spread of the estimator across datasets -- so this is bias
+leaking through the confounding channel, not over-confidence. See
+\code{inst/validation/coverage_simulation.R}.
+
+Treat that as a live limitation rather than a settled trade-off: the
+defaults below pass the coverage gate, but they pass it partly because a
+looser fit leaves less of the linear term to absorb. \code{tune = TRUE} searches
+for the best validation loss, which is the right objective for prediction
+and, on this evidence, the wrong one for causal work.
 
 \strong{Standardisation.} Predictors are centred and scaled using statistics
 computed here and stored on the object, so \code{\link[=feature_matrix]{feature_matrix()}} applies the
