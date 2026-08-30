@@ -24,31 +24,7 @@ BETA_TRUE <- 1.5
 CONFOUNDING <- 0.6
 SEEDS <- 101:125
 
-# A host Gibbs sampler of the kind a statistician would write around the block:
-# beta, then our conditional draw for f, then sigma^2.
-host_gibbs <- function(y, X, Phi, tau2, n_iter = 1500, burn = 500,
-                       v_beta = 100, a0 = 2, b0 = 1, seed = 1) {
-  set.seed(seed)
-  n <- length(y); p <- ncol(X)
-  mod <- bllnn_sampler(Phi, tau2 = tau2)
-  XtX <- crossprod(X)
-  beta <- rep(0, p); f <- rep(0, n); sigma2 <- var(y)
-  keep <- matrix(NA_real_, n_iter - burn, p)
-
-  for (it in seq_len(n_iter)) {
-    Vb <- solve(XtX / sigma2 + diag(p) / v_beta)
-    Vb <- (Vb + t(Vb)) / 2
-    beta <- as.vector(Vb %*% (crossprod(X, y - f) / sigma2) +
-                        t(chol(Vb)) %*% rnorm(p))
-    set_response(mod, y - as.vector(X %*% beta))
-    set_sigma(mod, sqrt(sigma2))
-    f <- gibbs_step(mod)
-    resid <- y - as.vector(X %*% beta) - f
-    sigma2 <- 1 / rgamma(1, a0 + n / 2, b0 + sum(resid^2) / 2)
-    if (it > burn) keep[it - burn, ] <- beta
-  }
-  keep[, 1]
-}
+source(file.path("inst", "validation", "host_sampler.R"))
 
 one_dataset <- function(seed, n = 800, width = 40) {
   sim <- sim_partial_linear(n = n, beta = c(treat = BETA_TRUE), p_z = 5,
@@ -73,7 +49,8 @@ one_dataset <- function(seed, n = 800, width = 40) {
   rows <- lapply(names(schemes), function(nm) {
     P <- schemes[[nm]]
     draws <- host_gibbs(yB, XB, P,
-                        tau2 = var(yB) / mean(rowSums(P^2)), seed = seed)
+                        tau2 = var(yB) / mean(rowSums(P^2)),
+                        seed = seed)$beta[, 1]
     ci <- quantile(draws, c(0.025, 0.975))
     data.frame(scheme = nm, seed = seed, mean = mean(draws),
                lo = ci[[1]], hi = ci[[2]],
