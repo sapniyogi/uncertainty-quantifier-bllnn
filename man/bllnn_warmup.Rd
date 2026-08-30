@@ -8,6 +8,7 @@
 bllnn_warmup(
   x,
   y,
+  linear = NULL,
   width = 50,
   epochs = 2000,
   activation = c("relu", "tanh"),
@@ -25,6 +26,11 @@ bllnn_warmup(
 
 \item{y}{Response for the warm-up fit, length \code{n}. In partial-linear use
 this is the part of the outcome the body is meant to explain.}
+
+\item{linear}{Optional matrix or vector of linear-term predictors, with
+\code{n} rows. Supplying it adds one auxiliary feature per column, estimating
+the conditional mean of that column given \code{x}. Required for causal use;
+omit it when the linear part is absent or known to be independent of \code{x}.}
 
 \item{width}{Number of hidden units.}
 
@@ -75,6 +81,23 @@ computed here and stored on the object, so \code{\link[=feature_matrix]{feature_
 identical transformation to new data. Recomputing them per-dataset would
 silently produce a different feature map for the sampling fold.
 }
+\section{Confounding}{
+
+
+When \code{linear} is supplied, an auxiliary body is trained for each of its
+columns to predict that column from \code{x}, and the fitted values are appended
+to the feature matrix. This gives the network the confounding channel
+explicitly, and it is what keeps the linear coefficient honest.
+
+The alternative -- projecting the features onto the orthogonal complement of
+the linear design -- is worse than doing nothing. It forces \verb{X'Phi = 0}, so
+the host's coefficient draw collapses to \verb{(X'X)^-1 X'y}, which is ordinary
+least squares with the confounding left in. Measured on 25 simulated
+datasets at confounding 0.6, that scheme covered the true coefficient 8\% of
+the time against a nominal 95\%; augmentation covered it consistently with
+nominal. See \code{inst/validation/confounding_checks.R}.
+}
+
 \examples{
 sim <- sim_partial_linear(n = 200, p_z = 5, seed = 1)
 r <- sim$data$y - as.vector(sim$X \%*\% sim$beta)

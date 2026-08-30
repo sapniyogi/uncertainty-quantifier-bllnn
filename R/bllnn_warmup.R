@@ -98,9 +98,29 @@ mlp_init <- function(p, width, activation) {
 #' identical transformation to new data. Recomputing them per-dataset would
 #' silently produce a different feature map for the sampling fold.
 #'
-#' @param x Predictor matrix or data frame, `n` x `p`, numeric.
+#' @section Confounding:
+#'
+#' When `linear` is supplied, an auxiliary body is trained for each of its
+#' columns to predict that column from `x`, and the fitted values are appended
+#' to the feature matrix. This gives the network the confounding channel
+#' explicitly, and it is what keeps the linear coefficient honest.
+#'
+#' The alternative -- projecting the features onto the orthogonal complement of
+#' the linear design -- is worse than doing nothing. It forces `X'Phi = 0`, so
+#' the host's coefficient draw collapses to `(X'X)^-1 X'y`, which is ordinary
+#' least squares with the confounding left in. Measured on 25 simulated
+#' datasets at confounding 0.6, that scheme covered the true coefficient 8% of
+#' the time against a nominal 95%; augmentation covered it consistently with
+#' nominal. See `inst/validation/confounding_checks.R`.
+#'
+#' @param x Predictor matrix or data frame, `n` x `p`, numeric. The variables
+#'   the nonlinear function is over.
 #' @param y Response for the warm-up fit, length `n`. In partial-linear use
 #'   this is the part of the outcome the body is meant to explain.
+#' @param linear Optional matrix or vector of linear-term predictors, with
+#'   `n` rows. Supplying it adds one auxiliary feature per column, estimating
+#'   the conditional mean of that column given `x`. Required for causal use;
+#'   omit it when the linear part is absent or known to be independent of `x`.
 #' @param width Number of hidden units.
 #' @param epochs Maximum training epochs.
 #' @param activation `"relu"` or `"tanh"`.
@@ -125,7 +145,7 @@ mlp_init <- function(p, width, activation) {
 #'
 #' @seealso [feature_matrix()], [bllnn_sampler()]
 #' @export
-bllnn_warmup <- function(x, y, width = 50, epochs = 2000,
+bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
                          activation = c("relu", "tanh"),
                          learn_rate = 0.01, weight_decay = 0.01,
                          validation = 0.25, patience = 300, seed = NULL) {
@@ -142,6 +162,24 @@ bllnn_warmup <- function(x, y, width = 50, epochs = 2000,
   if (length(y) != nrow(x)) {
     stop(sprintf("`y` has length %d but `x` has %d rows.", length(y), nrow(x)),
          call. = FALSE)
+  }
+  if (!is.null(linear)) {
+    if (is.data.frame(linear)) linear <- as.matrix(linear)
+    if (is.vector(linear) && is.numeric(linear)) {
+      linear <- matrix(linear, ncol = 1, dimnames = list(NULL, "linear1"))
+    }
+    if (!is.matrix(linear) || !is.numeric(linear)) {
+      stop("`linear` must be a numeric matrix, data frame or vector.",
+           call. = FALSE)
+    }
+    if (anyNA(linear)) stop("`linear` must not contain NA.", call. = FALSE)
+    if (nrow(linear) != nrow(x)) {
+      stop(sprintf("`linear` has %d rows but `x` has %d.",
+                   nrow(linear), nrow(x)), call. = FALSE)
+    }
+    if (is.null(colnames(linear))) {
+      colnames(linear) <- paste0("linear", seq_len(ncol(linear)))
+    }
   }
   for (nm in c("width", "epochs", "patience")) {
     v <- get(nm)
@@ -235,6 +273,21 @@ bllnn_warmup <- function(x, y, width = 50, epochs = 2000,
     }
   }
 
+  # Auxiliary bodies for the confounding channel: one per linear term,
+  # each estimating E[linear_j | x] on this same seed fold. Trained with
+  # linear = NULL so the recursion terminates.
+  aux <- NULL
+  if (!is.null(linear)) {
+    aux <- lapply(seq_len(ncol(linear)), function(j) {
+      bllnn_warmup(x, linear[, j], linear = NULL, width = width,
+                   epochs = epochs, activation = activation,
+                   learn_rate = learn_rate, weight_decay = weight_decay,
+                   validation = validation, patience = patience,
+                   seed = if (is.null(seed)) NULL else seed + j)
+    })
+    names(aux) <- colnames(linear)
+  }
+
   structure(list(
     params = best_par,
     activation = activation,
@@ -247,7 +300,9 @@ bllnn_warmup <- function(x, y, width = 50, epochs = 2000,
     val_loss = best_val,
     best_epoch = best_epoch,
     epochs_run = length(trace),
-    val_trace = trace
+    val_trace = trace,
+    aux = aux,
+    linear_names = if (is.null(linear)) NULL else colnames(linear)
   ), class = "bllnn_body")
 }
 
@@ -294,6 +349,15 @@ feature_matrix <- function(body, newdata) {
 
   Phi <- cbind(1, H)
   colnames(Phi) <- c("intercept", paste0("h", seq_len(body$width)))
+
+  # The confounding channel, if this body was warmed up with linear terms.
+  if (!is.null(body$aux)) {
+    ehat <- vapply(body$aux, function(a) predict(a, newdata),
+                   numeric(nrow(newdata)))
+    ehat <- matrix(ehat, nrow = nrow(newdata))
+    colnames(ehat) <- paste0("ehat_", body$linear_names)
+    Phi <- cbind(Phi, ehat)
+  }
   Phi
 }
 
@@ -317,8 +381,11 @@ feature_matrix <- function(body, newdata) {
 #'
 #' @export
 predict.bllnn_body <- function(object, newdata, ...) {
+  # Columns 2..(width+1) only: feature_matrix() may append confounding-channel
+  # features after the hidden units, and the body's own output layer has
+  # weights for the hidden units alone.
   Phi <- feature_matrix(object, newdata)
-  H <- Phi[, -1, drop = FALSE]
+  H <- Phi[, seq_len(object$width) + 1L, drop = FALSE]
   as.vector(H %*% object$params$w2 + object$params$b2) + object$y_centre
 }
 
@@ -330,7 +397,13 @@ print.bllnn_body <- function(x, ...) {
   cat("<bllnn_body>\n")
   cat(sprintf("  architecture : %d -> %d (%s) -> 1\n",
               x$n_inputs, x$width, x$activation))
-  cat(sprintf("  features     : %d, including intercept\n", x$width + 1))
+  n_aux <- if (is.null(x$aux)) 0L else length(x$aux)
+  cat(sprintf("  features     : %d, including intercept%s\n",
+              x$width + 1L + n_aux,
+              if (n_aux > 0) sprintf(" and %d confounding channel(s)", n_aux) else ""))
+  if (n_aux > 0) {
+    cat(sprintf("  linear terms : %s\n", paste(x$linear_names, collapse = ", ")))
+  }
   cat(sprintf("  epochs run   : %d, best at %d\n", x$epochs_run, x$best_epoch))
   cat(sprintf("  validation   : %.5g\n", x$val_loss))
   cat("  status       : frozen\n")
