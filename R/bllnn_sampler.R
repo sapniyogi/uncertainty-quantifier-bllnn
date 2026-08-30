@@ -73,8 +73,22 @@ stop_if_not_sampler <- function(mod) {
 #'   exactness of the draw depends on it.
 #' @param data Predictors to evaluate the features on. Required when `Phi` is a
 #'   `bllnn_body`, and not permitted otherwise.
-#' @param tau2 Prior variance of each weight, a single positive number. The
-#'   prior is `w ~ N(0, tau2 I)`.
+#' @param tau2 Prior variance of each weight, under `w ~ N(0, tau2 I)`. One of:
+#'   a positive number, to fix it; `"auto"` (the default), to set it from the
+#'   residual scale at the first [set_response()] call; or `"sample"`, to give
+#'   it a conjugate inverse-gamma hyperprior and draw it in every
+#'   [gibbs_step()]. Nobody should have to guess a prior variance, and the
+#'   value matters: across its plausible range the linear coefficient moved by
+#'   more than a third of its own size in our simulations.
+#'
+#'   `"auto"` and `"sample"` both calibrate to
+#'   `var(r) / mean(rowSums(Phi^2))`, which is the scale on which `Phi w` has
+#'   to live to explain the residual. That is empirical Bayes on the scale
+#'   only; with `"sample"` the shape is fixed and the data move `tau2` from
+#'   there.
+#' @param tau2_shape Shape of the inverse-gamma hyperprior used by
+#'   `tau2 = "sample"`. Must exceed 1 so the prior has a finite mean. The
+#'   default of 2 gives a finite mean and infinite variance.
 #' @param posterior Which posterior to draw from. Only `"conjugate"` is
 #'   implemented; the other names in [valid_kernels()] are accepted so that
 #'   [is_valid_kernel()] can report on them.
@@ -99,8 +113,9 @@ stop_if_not_sampler <- function(mod) {
 #' @seealso [set_response()], [set_sigma()], [gibbs_step()],
 #'   [is_valid_kernel()]
 #' @export
-bllnn_sampler <- function(Phi, tau2, posterior = "conjugate",
-                          features = "frozen", data = NULL) {
+bllnn_sampler <- function(Phi, tau2 = "auto", posterior = "conjugate",
+                          features = "frozen", data = NULL,
+                          tau2_shape = 2) {
   if (inherits(Phi, "bllnn_crossfit")) {
     if (!is.null(data)) {
       stop("A bllnn_crossfit already carries its features, so `data` is not ",
@@ -127,9 +142,19 @@ bllnn_sampler <- function(Phi, tau2, posterior = "conjugate",
   if (nrow(Phi) < 1 || ncol(Phi) < 1) {
     stop("`Phi` must have at least one row and one column.", call. = FALSE)
   }
-  if (!is.numeric(tau2) || length(tau2) != 1 || is.na(tau2) || tau2 <= 0) {
-    stop("`tau2` must be a single positive number. It is the prior variance, ",
-         "not the prior standard deviation.", call. = FALSE)
+  tau2_mode <- "fixed"
+  if (is.character(tau2) && length(tau2) == 1 && tau2 %in% c("auto", "sample")) {
+    tau2_mode <- tau2
+    tau2 <- NA_real_
+  } else if (!is.numeric(tau2) || length(tau2) != 1 || is.na(tau2) ||
+             tau2 <= 0) {
+    stop('`tau2` must be a single positive number, "auto", or "sample". It is ',
+         "the prior variance, not the prior standard deviation.", call. = FALSE)
+  }
+  if (!is.numeric(tau2_shape) || length(tau2_shape) != 1 ||
+      is.na(tau2_shape) || tau2_shape <= 1) {
+    stop("`tau2_shape` must be a single number greater than 1, so the prior ",
+         "has a finite mean.", call. = FALSE)
   }
   if (!is.character(posterior) || length(posterior) != 1 ||
       !posterior %in% known_posteriors()) {
@@ -153,6 +178,9 @@ bllnn_sampler <- function(Phi, tau2, posterior = "conjugate",
   mod$n <- nrow(Phi)
   mod$m <- m
   mod$tau2 <- tau2
+  mod$tau2_mode <- tau2_mode
+  mod$tau2_shape <- tau2_shape
+  mod$tau2_rate <- NA_real_
   mod$posterior <- posterior
   mod$features <- features
   mod$valid <- if (length(hit) == 1) tbl$valid[hit] else FALSE
@@ -165,7 +193,8 @@ bllnn_sampler <- function(Phi, tau2, posterior = "conjugate",
 
   # --- the precomputation contract: everything derivable from Phi alone ---
   mod$cross <- crossprod(Phi)
-  mod$prior_precision <- diag(m) / tau2
+  mod$identity <- diag(m)
+  mod$prior_precision <- if (tau2_mode == "fixed") mod$identity / tau2 else NULL
 
   # --- state supplied by the host, unset until it is ---
   mod$r <- NULL
@@ -243,6 +272,29 @@ set_response <- function(mod, r) {
   }
   mod$r <- as.vector(r)
   mod$Phi_r <- crossprod(mod$Phi, mod$r)
+
+  # Calibrate the prior scale the first time a response arrives. The scale that
+  # matters is the one on which f = Phi w lives, so match the implied prior
+  # variance of f to the variance of the residual it has to explain.
+  # Calibrate once, on the first response only. Recalibrating on every
+  # set_response() would let the prior chase the residual it is meant to
+  # regularise, and in a Gibbs loop that residual changes every sweep.
+  if (mod$tau2_mode != "fixed" && is.na(mod$tau2)) {
+    scale <- stats::var(mod$r) / mean(rowSums(mod$Phi^2))
+    if (!is.finite(scale) || scale <= 0) scale <- 1
+    if (mod$tau2_mode == "auto") {
+      mod$tau2 <- scale
+      mod$prior_precision <- mod$identity / scale
+    } else {
+      # tau2 ~ InvGamma(shape, rate) with the rate set so the prior mean is
+      # that same scale. Empirical Bayes on the scale only; the shape is fixed
+      # at a value giving a finite mean and infinite variance, so the data
+      # move tau2 freely from there.
+      mod$tau2_rate <- scale * (mod$tau2_shape - 1)
+      mod$tau2 <- scale
+      mod$prior_precision <- mod$identity / scale
+    }
+  }
   invisible(mod)
 }
 
@@ -334,6 +386,22 @@ gibbs_step <- function(mod, force = FALSE) {
     stop("No noise level set. Call set_sigma(mod, s) before gibbs_step().",
          call. = FALSE)
   }
+  if (is.null(mod$prior_precision)) {
+    stop("The prior scale is not calibrated yet. Call set_response(mod, r) ",
+         "first; with tau2 = \"auto\" or \"sample\" the scale is read from ",
+         "the residual.", call. = FALSE)
+  }
+
+  # tau2 | w, then w | r, sigma, tau2. Both steps are exact, so the pair is a
+  # valid Gibbs sweep on (w, tau2) given the residual and the noise level.
+  # tau2 is this block's own prior parameter, not the host's sigma^2, so
+  # updating it here does not use the data twice.
+  if (mod$tau2_mode == "sample" && !is.null(mod$w)) {
+    shape <- mod$tau2_shape + mod$m / 2
+    rate <- mod$tau2_rate + sum(mod$w^2) / 2
+    mod$tau2 <- 1 / stats::rgamma(1, shape = shape, rate = rate)
+    mod$prior_precision <- mod$identity / mod$tau2
+  }
 
   post <- conjugate_moments_core(mod$cross, mod$Phi_r, mod$prior_precision,
                                  mod$sigma)
@@ -354,7 +422,15 @@ print.bllnn_sampler <- function(x, ...) {
   cat("<bllnn_sampler>\n")
   cat(sprintf("  features   : %d x %d, %s\n", x$n, x$m, x$features))
   cat(sprintf("  posterior  : %s\n", x$posterior))
-  cat(sprintf("  prior      : w ~ N(0, %g I)\n", x$tau2))
+  cat(sprintf("  prior      : w ~ N(0, %s I)%s\n",
+              if (is.na(x$tau2)) "tau2" else format(x$tau2, digits = 4),
+              switch(x$tau2_mode,
+                     fixed = "",
+                     auto = "   [tau2 from the residual scale]",
+                     sample = sprintf("   [tau2 sampled, InvGamma(%g, %s)]",
+                                      x$tau2_shape,
+                                      if (is.na(x$tau2_rate)) "rate"
+                                      else format(x$tau2_rate, digits = 3)))))
   cat(sprintf("  valid kernel: %s\n", if (x$valid) "yes" else "NO"))
   if (!x$valid) cat(sprintf("    %s\n", x$reason))
   cat(sprintf("  response   : %s\n",

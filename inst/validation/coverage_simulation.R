@@ -22,6 +22,10 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 args <- commandArgs(trailingOnly = TRUE)
 N_DATASETS <- if (length(args) >= 1) as.integer(args[1]) else 100
+# How the prior variance is chosen: "auto", "sample", or a number.
+TAU2 <- if (length(args) >= 2) {
+  if (grepl("^[0-9.]+$", args[2])) as.numeric(args[2]) else args[2]
+} else "auto"
 
 BETA_TRUE <- 1.5
 CONFOUNDING <- 0.6
@@ -45,14 +49,13 @@ one_dataset <- function(seed, keep_draws = FALSE) {
   cf <- bllnn_crossfit(sim$Z, sim$data$y, linear = sim$X, folds = FOLDS,
                        width = WIDTH, epochs = EPOCHS, seed = seed)
   Phi <- feature_matrix(cf)
-  tau2 <- var(sim$data$y) / mean(rowSums(Phi^2))
 
   # Regress on the residualised treatment, not the raw column. Phi contains
   # E[X|Z], so the nonlinear part can represent it, and the response depends
   # on E[X|Z] only through X*beta -- the two compete for that direction and
   # the coefficient is attenuated. X - E[X|Z] carries nothing Z explains, so
   # there is nothing left to absorb.
-  fit <- host_gibbs(sim$data$y, partial_out(cf), Phi, tau2 = tau2,
+  fit <- host_gibbs(sim$data$y, partial_out(cf), Phi, tau2 = TAU2,
                     n_iter = N_ITER, burn = BURN, seed = seed)
   draws <- fit$beta[, 1]
   ci <- quantile(draws, c(0.025, 0.975))
@@ -70,8 +73,8 @@ one_dataset <- function(seed, keep_draws = FALSE) {
 
 cat(sprintf("beta = %.2f, confounding = %.1f, n = %d, %d folds, width %d\n",
             BETA_TRUE, CONFOUNDING, N_OBS, FOLDS, WIDTH))
-cat(sprintf("%d datasets, %d Gibbs iterations (%d burn-in)\n\n",
-            N_DATASETS, N_ITER, BURN))
+cat(sprintf("%d datasets, %d Gibbs iterations (%d burn-in), tau2 = %s\n\n",
+            N_DATASETS, N_ITER, BURN, as.character(TAU2)))
 
 started <- Sys.time()
 results <- vector("list", N_DATASETS)

@@ -7,10 +7,11 @@
 \usage{
 bllnn_sampler(
   Phi,
-  tau2,
+  tau2 = "auto",
   posterior = "conjugate",
   features = "frozen",
-  data = NULL
+  data = NULL,
+  tau2_shape = 2
 )
 
 \method{print}{bllnn_sampler}(x, ...)
@@ -21,8 +22,19 @@ bllnn_sampler(
 held-out fold and then fixed; this object does not check that, but the
 exactness of the draw depends on it.}
 
-\item{tau2}{Prior variance of each weight, a single positive number. The
-prior is \verb{w ~ N(0, tau2 I)}.}
+\item{tau2}{Prior variance of each weight, under \verb{w ~ N(0, tau2 I)}. One of:
+a positive number, to fix it; \code{"auto"} (the default), to set it from the
+residual scale at the first \code{\link[=set_response]{set_response()}} call; or \code{"sample"}, to give
+it a conjugate inverse-gamma hyperprior and draw it in every
+\code{\link[=gibbs_step]{gibbs_step()}}. Nobody should have to guess a prior variance, and the
+value matters: across its plausible range the linear coefficient moved by
+more than a third of its own size in our simulations.
+
+\code{"auto"} and \code{"sample"} both calibrate to
+\code{var(r) / mean(rowSums(Phi^2))}, which is the scale on which \verb{Phi w} has
+to live to explain the residual. That is empirical Bayes on the scale
+only; with \code{"sample"} the shape is fixed and the data move \code{tau2} from
+there.}
 
 \item{posterior}{Which posterior to draw from. Only \code{"conjugate"} is
 implemented; the other names in \code{\link[=valid_kernels]{valid_kernels()}} are accepted so that
@@ -33,6 +45,10 @@ implemented; the other names in \code{\link[=valid_kernels]{valid_kernels()}} ar
 
 \item{data}{Predictors to evaluate the features on. Required when \code{Phi} is a
 \code{bllnn_body}, and not permitted otherwise.}
+
+\item{tau2_shape}{Shape of the inverse-gamma hyperprior used by
+\code{tau2 = "sample"}. Must exceed 1 so the prior has a finite mean. The
+default of 2 gives a finite mean and infinite variance.}
 
 \item{x}{A \code{bllnn_sampler} object.}
 

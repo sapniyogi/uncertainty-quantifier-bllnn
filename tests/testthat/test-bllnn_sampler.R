@@ -316,3 +316,112 @@ test_that("print reports the state without evaluating the draw", {
   bad <- bllnn_sampler(case$Phi, case$tau2, "vi", "frozen")
   expect_output(print(bad), "NO")
 })
+
+# --- the prior scale --------------------------------------------------------
+
+test_that("auto sets tau2 from the residual scale at set_response", {
+  case <- sampler_case()
+  mod <- bllnn_sampler(case$Phi, tau2 = "auto")
+
+  # Nothing to calibrate against until a response arrives.
+  expect_true(is.na(mod$tau2))
+  expect_null(mod$prior_precision)
+  set_sigma(mod, case$sigma)
+  expect_error(gibbs_step(mod), "set_response")
+
+  set_response(mod, case$r)
+  expected <- var(case$r) / mean(rowSums(case$Phi^2))
+  expect_equal(mod$tau2, expected)
+  expect_equal(mod$prior_precision, diag(case$m) / expected)
+
+  expect_length(gibbs_step(mod), case$n)
+})
+
+test_that("auto holds tau2 fixed once calibrated", {
+  case <- sampler_case()
+  mod <- bllnn_sampler(case$Phi, tau2 = "auto")
+  set_response(mod, case$r); set_sigma(mod, case$sigma)
+
+  first <- mod$tau2
+  for (i in 1:5) gibbs_step(mod)
+  expect_equal(mod$tau2, first)
+
+  # A new residual must not silently recalibrate: the prior would then chase
+  # the response it is meant to regularise.
+  set_response(mod, rnorm(case$n))
+  expect_equal(mod$tau2, first)
+})
+
+test_that("sample moves tau2 and the conditional is the right inverse gamma", {
+  case <- sampler_case()
+  mod <- bllnn_sampler(case$Phi, tau2 = "sample")
+  set_response(mod, case$r); set_sigma(mod, case$sigma)
+
+  gibbs_step(mod)                      # first step has no previous w
+  seen <- replicate(20, {gibbs_step(mod); mod$tau2})
+  expect_gt(length(unique(seen)), 15)
+  expect_true(all(seen > 0))
+
+  # Closed form. Holding w fixed, tau2 | w is
+  # InvGamma(shape + m/2, rate + sum(w^2)/2), whose mean is rate'/(shape'-1).
+  w_fixed <- rep(0.4, case$m)
+  shape <- mod$tau2_shape + case$m / 2
+  rate <- mod$tau2_rate + sum(w_fixed^2) / 2
+
+  set.seed(3)
+  draws <- vapply(seq_len(4000), function(i) {
+    mod$w <- w_fixed
+    gibbs_step(mod)
+    mod$tau2
+  }, numeric(1))
+
+  expect_equal(mean(draws), rate / (shape - 1), tolerance = 0.02)
+  expect_equal(var(draws), rate^2 / ((shape - 1)^2 * (shape - 2)),
+               tolerance = 0.1)
+})
+
+test_that("a fixed tau2 is never touched", {
+  case <- sampler_case()
+  mod <- bllnn_sampler(case$Phi, tau2 = 7)
+  expect_equal(mod$tau2, 7)
+  expect_equal(mod$prior_precision, diag(case$m) / 7)
+
+  set_response(mod, case$r); set_sigma(mod, case$sigma)
+  expect_equal(mod$tau2, 7)
+  for (i in 1:5) gibbs_step(mod)
+  expect_equal(mod$tau2, 7)
+})
+
+test_that("tau2 and its shape are validated", {
+  case <- sampler_case()
+
+  expect_error(bllnn_sampler(case$Phi, tau2 = "magic"), "positive number")
+  expect_error(bllnn_sampler(case$Phi, tau2 = 0), "positive number")
+  expect_error(bllnn_sampler(case$Phi, tau2 = -1), "positive number")
+  expect_error(bllnn_sampler(case$Phi, tau2 = c(1, 2)), "positive number")
+  expect_error(bllnn_sampler(case$Phi, tau2 = "sample", tau2_shape = 1),
+               "greater than 1")
+  expect_error(bllnn_sampler(case$Phi, tau2 = "sample", tau2_shape = 0.5),
+               "greater than 1")
+})
+
+test_that("print reports how tau2 is being handled", {
+  case <- sampler_case()
+  expect_output(print(bllnn_sampler(case$Phi, tau2 = 3)), "N(0, 3 I)",
+                fixed = TRUE)
+  expect_output(print(bllnn_sampler(case$Phi, tau2 = "auto")),
+                "residual scale")
+  expect_output(print(bllnn_sampler(case$Phi, tau2 = "sample")), "InvGamma")
+})
+
+test_that("auto reproduces the value the validation scripts used by hand", {
+  # The coverage simulation calibrated tau2 with this expression written out
+  # at the call site. Moving it into the package must not change the number,
+  # or the passing gate would not carry over.
+  case <- sampler_case()
+  mod <- bllnn_sampler(case$Phi, tau2 = "auto")
+  set_response(mod, case$r)
+
+  by_hand <- var(case$r) / mean(rowSums(case$Phi^2))
+  expect_equal(mod$tau2, by_hand)
+})

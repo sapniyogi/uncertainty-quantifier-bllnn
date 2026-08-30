@@ -12,7 +12,7 @@
 # it in each sweep. That is design rule 2, and this file is what it looks like
 # from the caller's side.
 
-host_gibbs <- function(y, X, Phi, tau2, n_iter = 1500, burn = 500,
+host_gibbs <- function(y, X, Phi, tau2 = "auto", n_iter = 1500, burn = 500,
                        v_beta = 100, a0 = 2, b0 = 1, seed = 1) {
   stopifnot(is.matrix(X), length(y) == nrow(X), nrow(Phi) == length(y))
   set.seed(seed)
