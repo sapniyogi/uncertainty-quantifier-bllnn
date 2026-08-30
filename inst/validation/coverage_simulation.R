@@ -47,7 +47,12 @@ one_dataset <- function(seed, keep_draws = FALSE) {
   Phi <- feature_matrix(cf)
   tau2 <- var(sim$data$y) / mean(rowSums(Phi^2))
 
-  fit <- host_gibbs(sim$data$y, sim$X, Phi, tau2 = tau2,
+  # Regress on the residualised treatment, not the raw column. Phi contains
+  # E[X|Z], so the nonlinear part can represent it, and the response depends
+  # on E[X|Z] only through X*beta -- the two compete for that direction and
+  # the coefficient is attenuated. X - E[X|Z] carries nothing Z explains, so
+  # there is nothing left to absorb.
+  fit <- host_gibbs(sim$data$y, partial_out(cf), Phi, tau2 = tau2,
                     n_iter = N_ITER, burn = BURN, seed = seed)
   draws <- fit$beta[, 1]
   ci <- quantile(draws, c(0.025, 0.975))

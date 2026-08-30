@@ -231,3 +231,98 @@ test_that("cross-fitting fits f at least as well as a single split", {
 
   expect_lt(err_cf, err_split)
 })
+
+# --- partialling the nuisance out of the linear terms -----------------------
+
+test_that("partial_out returns cross-fitted residuals of the linear terms", {
+  case <- cf_case(n = 200)
+  cf <- bllnn_crossfit(case$Z, case$y, linear = case$X, folds = 4, width = 8,
+                       epochs = 200, seed = 1)
+
+  xt <- partial_out(cf)
+  expect_equal(dim(xt), dim(case$X))
+  expect_equal(colnames(xt), colnames(case$X))
+  expect_equal(xt, case$X - cf$ehat)
+
+  # Each row's ehat must come from the body that did not train on it, or the
+  # residual is contaminated by the row's own response.
+  for (k in seq_len(cf$n_folds)) {
+    held <- cf$fold == k
+    expect_equal(unname(cf$ehat[held, 1]),
+                 unname(predict(cf$bodies[[k]]$aux[[1]],
+                                case$Z[held, , drop = FALSE])))
+  }
+})
+
+test_that("residualising removes the part of the treatment that Z explains", {
+  # The whole point: the residual must be much less predictable from Z than
+  # the raw column, or it cannot protect the coefficient from absorption.
+  case <- cf_case(n = 400)
+  cf <- bllnn_crossfit(case$Z, case$y, linear = case$X, folds = 5, width = 20,
+                       epochs = 600, seed = 1)
+  xt <- partial_out(cf)
+
+  r2 <- function(v) summary(lm(v ~ case$Z))$r.squared
+  cat(sprintf("\n[partial_out] R^2 of Z on treatment: raw %.4f, residualised %.4f\n",
+              r2(case$X[, 1]), r2(xt[, 1])))
+
+  expect_lt(r2(xt[, 1]), r2(case$X[, 1]))
+  expect_lt(var(xt[, 1]), var(case$X[, 1]))
+})
+
+test_that("partial_out refuses a crossfit built without linear terms", {
+  case <- cf_case(n = 120)
+  cf <- bllnn_crossfit(case$Z, case$y, folds = 2, width = 4, epochs = 60,
+                       seed = 1)
+
+  expect_null(cf$ehat)
+  expect_error(partial_out(cf), "without `linear`")
+  expect_error(partial_out(42), "no applicable method|not.*method")
+})
+
+test_that("residualising reduces the bias in the coefficient", {
+  # The end-to-end claim, at a size where the effect is visible without a
+  # full Monte Carlo study. Both arms share one set of cross-fitted bodies,
+  # so the only difference is which design the host regresses on.
+  skip_on_cran()
+  beta_true <- 1.5
+
+  host_beta <- function(y, X, Phi, tau2, seed = 1, n_iter = 900, burn = 300) {
+    set.seed(seed)
+    n <- length(y); p <- ncol(X)
+    mod <- bllnn_sampler(Phi, tau2 = tau2)
+    XtX <- crossprod(X); beta <- rep(0, p); f <- rep(0, n); s2 <- var(y)
+    keep <- numeric(n_iter - burn)
+    for (it in seq_len(n_iter)) {
+      Vb <- solve(XtX / s2 + diag(p) / 100); Vb <- (Vb + t(Vb)) / 2
+      beta <- as.vector(Vb %*% (crossprod(X, y - f) / s2) +
+                          t(chol(Vb)) %*% rnorm(p))
+      set_response(mod, y - as.vector(X %*% beta))
+      set_sigma(mod, sqrt(s2))
+      f <- gibbs_step(mod)
+      resid <- y - as.vector(X %*% beta) - f
+      s2 <- 1 / rgamma(1, 2 + n / 2, 1 + sum(resid^2) / 2)
+      if (it > burn) keep[it - burn] <- beta[1]
+    }
+    mean(keep)
+  }
+
+  errs <- vapply(1:6, function(i) {
+    sim <- sim_partial_linear(n = 500, beta = c(treat = beta_true), p_z = 5,
+                              f = "friedman", confounding = 0.6, sigma = 1,
+                              seed = 7000 + i)
+    cf <- bllnn_crossfit(sim$Z, sim$data$y, linear = sim$X, folds = 5,
+                         width = 20, epochs = 600, seed = 7000 + i)
+    Phi <- feature_matrix(cf)
+    t2 <- var(sim$data$y) / mean(rowSums(Phi^2))
+    c(raw = host_beta(sim$data$y, sim$X, Phi, t2, seed = i),
+      residualised = host_beta(sim$data$y, partial_out(cf), Phi, t2, seed = i))
+  }, numeric(2))
+
+  bias <- rowMeans(errs) - beta_true
+  cat(sprintf("[partial_out] bias over 6 datasets: raw %+.4f, residualised %+.4f\n",
+              bias[["raw"]], bias[["residualised"]]))
+
+  # Both are biased downward; residualising must shrink it.
+  expect_lt(abs(bias[["residualised"]]), abs(bias[["raw"]]))
+})
