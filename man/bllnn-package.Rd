@@ -2,7 +2,6 @@
 % Please edit documentation in R/bllnn-package.R
 \docType{package}
 \name{bllnn-package}
-\alias{bllnn}
 \alias{bllnn-package}
 \title{bllnn: Bayesian Last Layer Neural Networks as Composable Gibbs Blocks}
 \description{
