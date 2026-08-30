@@ -63,7 +63,8 @@ test_that("the gradient check would fail on a wrong gradient", {
 
   correct <- mlp_loss_grad(par, X, y, act_f, act_d)$grad
   # A plausible slip: forgetting the activation derivative in the hidden layer.
-  wrong_gA1 <- outer(2 * (mlp_forward(par, X, act_f)$yhat - y) / 30, par$w2)
+  wrong_gA1 <- outer(2 * (mlp_forward(par, X, act_f)$yhat - y) / 30,
+                     par$w_out)
   wrong_W1 <- crossprod(X, wrong_gA1)
 
   expect_false(isTRUE(all.equal(as.vector(correct$W1), as.vector(wrong_W1),
@@ -237,7 +238,7 @@ test_that("print reports the architecture and frozen status", {
   body <- bllnn_warmup(case$Z, case$r, width = 11, epochs = 100, seed = 1)
 
   expect_output(print(body), "bllnn_body")
-  expect_output(print(body), "5 -> 11")
+  expect_output(print(body), "5 -> 11 -> 1")
   expect_output(print(body), "frozen")
 })
 
@@ -407,4 +408,125 @@ test_that("augmentation recovers the linear coefficient where plain features do 
   # Augmentation must land closer to the truth than that does.
   expect_lt(abs(mean(b_aug) - beta_true), abs(mean(b_orth) - beta_true))
   expect_lt(abs(mean(b_aug) - beta_true), 0.25)
+})
+
+# --- depth ------------------------------------------------------------------
+
+test_that("the analytic gradient matches finite differences at depth", {
+  # The single-layer gradient check above cannot see an error in the recursion
+  # that propagates delta between hidden layers, because there is nothing to
+  # propagate through. This one can.
+  set.seed(4)
+  n <- 25
+  p <- 3
+  X <- matrix(rnorm(n * p), n, p)
+  y <- rnorm(n)
+
+  for (act in c("relu", "tanh")) {
+    for (widths in list(c(4, 3), c(5, 4, 3))) {
+      act_f <- activation_fun(act)
+      act_d <- activation_grad(act)
+
+      set.seed(1)
+      par <- mlp_init(p, widths, act)
+      for (l in seq_along(widths)) {
+        nm <- paste0("b", l)
+        par[[nm]] <- par[[nm]] + rnorm(widths[l], sd = 0.3)
+      }
+
+      expect_equal(mlp_layers(par), length(widths))
+      analytic <- mlp_loss_grad(par, X, y, act_f, act_d)$grad
+      expect_named(analytic, names(par))
+
+      h <- 1e-6
+      for (nm in names(par)) {
+        numeric_grad <- par[[nm]] * 0
+        for (i in seq_along(par[[nm]])) {
+          up <- par; down <- par
+          up[[nm]][i] <- up[[nm]][i] + h
+          down[[nm]][i] <- down[[nm]][i] - h
+          numeric_grad[i] <-
+            (mean((mlp_forward(up, X, act_f)$yhat - y)^2) -
+               mean((mlp_forward(down, X, act_f)$yhat - y)^2)) / (2 * h)
+        }
+        expect_equal(as.vector(analytic[[nm]]), as.vector(numeric_grad),
+                     tolerance = 1e-6,
+                     info = paste(act, length(widths), "layers", nm))
+      }
+    }
+  }
+})
+
+test_that("a scalar width still gives exactly one hidden layer", {
+  case <- warmup_case(n = 120)
+  one <- bllnn_warmup(case$Z, case$r, width = 7, epochs = 100, seed = 1)
+  vec <- bllnn_warmup(case$Z, case$r, width = c(7), epochs = 100, seed = 1)
+
+  expect_equal(one$widths, 7L)
+  expect_equal(mlp_layers(one$params), 1L)
+  # Passing the same size as a length-one vector must be the same network,
+  # or the scalar path has quietly diverged from the general one.
+  expect_equal(one$params, vec$params)
+})
+
+test_that("depth is honoured end to end", {
+  case <- warmup_case(n = 250)
+  deep <- bllnn_warmup(case$Z, case$r, width = c(16, 8), epochs = 300, seed = 1)
+
+  expect_equal(deep$widths, c(16L, 8L))
+  expect_equal(mlp_layers(deep$params), 2L)
+  expect_equal(dim(deep$params$W1), c(5L, 16L))
+  expect_equal(dim(deep$params$W2), c(16L, 8L))
+  expect_length(deep$params$w_out, 8L)
+
+  # Features come from the LAST hidden layer, so the feature count follows the
+  # last width and not the first.
+  Phi <- feature_matrix(deep, case$Z)
+  expect_equal(ncol(Phi), 9L)
+  expect_equal(deep$width, 8L)
+
+  expect_length(predict(deep, case$Z), nrow(case$Z))
+  expect_output(print(deep), "5 -> 16 -> 8 -> 1")
+})
+
+test_that("a deep body drives the sampler and cross-fits", {
+  case <- warmup_case(n = 200)
+  deep <- bllnn_warmup(case$Z, case$r, width = c(12, 6), epochs = 200, seed = 1)
+
+  mod <- bllnn_sampler(deep, tau2 = 1, data = case$Z)
+  expect_equal(mod$m, 7L)
+  set_response(mod, case$r)
+  set_sigma(mod, case$sigma)
+  expect_length(gibbs_step(mod), nrow(case$Z))
+
+  cf <- bllnn_crossfit(case$Z, case$r, folds = 3, width = c(10, 5),
+                       epochs = 150, seed = 1)
+  expect_equal(cf$m_per_fold, 6L)
+  expect_equal(ncol(feature_matrix(cf)), 18L)
+  for (k in 1:3) expect_equal(cf$bodies[[k]]$widths, c(10L, 5L))
+})
+
+test_that("depth reaches every layer through weight decay and init", {
+  case <- warmup_case(n = 150)
+  deep <- bllnn_warmup(case$Z, case$r, width = c(9, 6, 4), epochs = 150,
+                       weight_decay = 0.01, seed = 1)
+
+  expect_equal(mlp_layers(deep$params), 3L)
+  # Each layer is initialised from its own fan-in, so no layer is left at the
+  # zero it starts from or exploded by a single global scale.
+  for (l in 1:3) {
+    W <- deep$params[[paste0("W", l)]]
+    expect_true(all(is.finite(W)))
+    expect_gt(sd(as.vector(W)), 0)
+  }
+  expect_true(all(is.finite(feature_matrix(deep, case$Z))))
+})
+
+test_that("invalid widths are refused", {
+  case <- warmup_case(n = 60)
+
+  expect_error(bllnn_warmup(case$Z, case$r, width = c(5, 0)), "positive integer")
+  expect_error(bllnn_warmup(case$Z, case$r, width = c(5, 2.5)), "positive integer")
+  expect_error(bllnn_warmup(case$Z, case$r, width = integer(0)), "positive integer")
+  expect_error(bllnn_warmup(case$Z, case$r, width = c(5, NA)), "positive integer")
 })

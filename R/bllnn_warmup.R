@@ -1,13 +1,14 @@
 # Reference implementation, plain R by design.
 #
-# The network body: a single hidden layer trained once on a seed fold, then
-# frozen. Deliberately dependency-free. A torch backend was considered and
-# deferred: the optimiser is not the binding constraint here (Adam drives the
-# training loss to ~1e-4 on this problem), the residual error is the
-# approximation error of a single layer on finite data, and at this scale
-# R's matrix operations are competitive with per-operation dispatch through
-# libtorch. If a deeper body is ever wanted, the body interface below is the
-# seam an alternative backend plugs into: anything supplying
+# The network body: one or more hidden layers trained once on a seed fold and
+# then frozen. Depth is set by passing a vector to `width`.
+#
+# Deliberately dependency-free. A torch backend was considered and deferred:
+# the optimiser is not the binding constraint at this scale (Adam drives the
+# training loss to ~1e-4 on this problem), and R's matrix operations are
+# competitive with per-operation dispatch through libtorch for networks this
+# small. That argument weakens with real depth or real scale, and the body
+# interface is the seam an alternative backend plugs into: anything supplying
 # feature_matrix(body, newdata) works with the sampler unchanged.
 
 activation_fun <- function(name) {
@@ -22,15 +23,32 @@ activation_grad <- function(name) {
          tanh = function(a) 1 - tanh(a)^2)
 }
 
-#' Forward pass of the single-hidden-layer body
+#' Number of hidden layers carried by a parameter list
+#' @noRd
+mlp_layers <- function(par) sum(grepl("^W[0-9]+$", names(par)))
+
+#' Forward pass through an arbitrary number of hidden layers
 #'
-#' @return A list with the pre-activations `A1`, the hidden activations `H`,
-#'   and the scalar output `yhat`.
+#' @return A list with the per-layer pre-activations `A`, the per-layer
+#'   activations `H`, and the scalar output `yhat`. The features the sampler
+#'   draws over are the last element of `H`.
 #' @noRd
 mlp_forward <- function(par, X, act_f) {
-  A1 <- X %*% par$W1 + rep(par$b1, each = nrow(X))
-  H <- act_f(A1)
-  list(A1 = A1, H = H, yhat = as.vector(H %*% par$w2 + par$b2))
+  n_layer <- mlp_layers(par)
+  n <- nrow(X)
+  A <- vector("list", n_layer)
+  H <- vector("list", n_layer)
+
+  input <- X
+  for (l in seq_len(n_layer)) {
+    A[[l]] <- input %*% par[[paste0("W", l)]] +
+      rep(par[[paste0("b", l)]], each = n)
+    H[[l]] <- act_f(A[[l]])
+    input <- H[[l]]
+  }
+
+  list(A = A, H = H,
+       yhat = as.vector(H[[n_layer]] %*% par$w_out + par$b_out))
 }
 
 #' Mean squared error and its exact gradient
@@ -39,43 +57,65 @@ mlp_forward <- function(par, X, act_f) {
 #' against finite differences, which is the closed-form test this routine
 #' gets in place of a reference implementation.
 #'
+#' Backpropagation over layers `L` down to 1:
+#'   `delta_L = (dL/dyhat) w_out' * act'(A_L)`
+#'   `delta_{l-1} = (delta_l W_l') * act'(A_{l-1})`
+#' with `dL/dW_l = input_l' delta_l` and `dL/db_l = colSums(delta_l)`, where
+#' `input_l` is `X` for the first layer and `H_{l-1}` after that.
+#'
 #' @noRd
 mlp_loss_grad <- function(par, X, y, act_f, act_d) {
   n <- nrow(X)
+  n_layer <- mlp_layers(par)
   fw <- mlp_forward(par, X, act_f)
   resid <- fw$yhat - y
 
   g_yhat <- 2 * resid / n
-  gA1 <- outer(g_yhat, par$w2) * act_d(fw$A1)
+  grad <- list()
+  grad$w_out <- as.vector(crossprod(fw$H[[n_layer]], g_yhat))
+  grad$b_out <- sum(g_yhat)
 
-  list(
-    loss = mean(resid^2),
-    grad = list(
-      W1 = crossprod(X, gA1),
-      b1 = colSums(gA1),
-      w2 = as.vector(crossprod(fw$H, g_yhat)),
-      b2 = sum(g_yhat)
-    )
-  )
+  delta <- outer(g_yhat, par$w_out) * act_d(fw$A[[n_layer]])
+  for (l in rev(seq_len(n_layer))) {
+    input_l <- if (l == 1L) X else fw$H[[l - 1L]]
+    grad[[paste0("W", l)]] <- crossprod(input_l, delta)
+    grad[[paste0("b", l)]] <- colSums(delta)
+    if (l > 1L) {
+      delta <- tcrossprod(delta, par[[paste0("W", l)]]) * act_d(fw$A[[l - 1L]])
+    }
+  }
+
+  list(loss = mean(resid^2), grad = grad[names(par)])
 }
 
-#' Initialise weights
+#' Initialise weights for one or more hidden layers
+#'
+#' Each layer is scaled by its own fan-in, which matters more with depth: a
+#' single global scale leaves deep networks either saturating or vanishing
+#' before training starts.
+#'
 #' @noRd
-mlp_init <- function(p, width, activation) {
-  scale_in <- if (activation == "relu") sqrt(2 / p) else sqrt(1 / p)
-  list(
-    W1 = matrix(stats::rnorm(p * width, sd = scale_in), p, width),
-    b1 = rep(0, width),
-    w2 = stats::rnorm(width, sd = sqrt(1 / width)),
-    b2 = 0
-  )
+mlp_init <- function(p, widths, activation) {
+  gain <- if (activation == "relu") 2 else 1
+  par <- list()
+  fan_in <- p
+  for (l in seq_along(widths)) {
+    par[[paste0("W", l)]] <- matrix(
+      stats::rnorm(fan_in * widths[l], sd = sqrt(gain / fan_in)),
+      fan_in, widths[l])
+    par[[paste0("b", l)]] <- rep(0, widths[l])
+    fan_in <- widths[l]
+  }
+  par$w_out <- stats::rnorm(fan_in, sd = sqrt(1 / fan_in))
+  par$b_out <- 0
+  par
 }
 
 #' Learn a frozen network body
 #'
-#' Trains a single-hidden-layer network on a seed fold and freezes it. The
-#' hidden activations become the fixed feature matrix that
-#' [bllnn_sampler()] draws a last layer over.
+#' Trains a network on a seed fold and freezes it. The activations of its last
+#' hidden layer become the fixed feature matrix that [bllnn_sampler()] draws a
+#' last layer over.
 #'
 #' @details
 #'
@@ -121,7 +161,10 @@ mlp_init <- function(p, width, activation) {
 #'   `n` rows. Supplying it adds one auxiliary feature per column, estimating
 #'   the conditional mean of that column given `x`. Required for causal use;
 #'   omit it when the linear part is absent or known to be independent of `x`.
-#' @param width Number of hidden units.
+#' @param width Hidden layer sizes. A single number gives one hidden layer;
+#'   a vector gives one layer per element, so `width = c(64, 32)` is a network
+#'   with 64 units then 32. The features handed to the sampler are the
+#'   activations of the last layer, so its size sets the number of features.
 #' @param epochs Maximum training epochs.
 #' @param activation `"relu"` or `"tanh"`.
 #' @param learn_rate Adam step size.
@@ -181,7 +224,12 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
       colnames(linear) <- paste0("linear", seq_len(ncol(linear)))
     }
   }
-  for (nm in c("width", "epochs", "patience")) {
+  if (!is.numeric(width) || length(width) < 1 || anyNA(width) ||
+      any(width < 1) || any(width != round(width))) {
+    stop("`width` must be a positive integer, or a vector of them giving the ",
+         "hidden layer sizes.", call. = FALSE)
+  }
+  for (nm in c("epochs", "patience")) {
     v <- get(nm)
     if (!is.numeric(v) || length(v) != 1 || is.na(v) || v < 1 || v != round(v)) {
       stop(sprintf("`%s` must be a single positive integer.", nm), call. = FALSE)
@@ -213,7 +261,7 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
     set.seed(seed)
   }
 
-  width <- as.integer(width)
+  widths <- as.integer(width)
   n <- nrow(x)
   p <- ncol(x)
 
@@ -236,11 +284,11 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
   act_f <- activation_fun(activation)
   act_d <- activation_grad(activation)
 
-  par <- mlp_init(p, width, activation)
+  par <- mlp_init(p, widths, activation)
   m_state <- lapply(par, function(z) z * 0)
   v_state <- lapply(par, function(z) z * 0)
   beta1 <- 0.9; beta2 <- 0.999; eps <- 1e-8
-  decayed <- c("W1", "w2")
+  decayed <- c(paste0("W", seq_along(widths)), "w_out")
 
   best_val <- Inf
   best_par <- par
@@ -291,7 +339,8 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
   structure(list(
     params = best_par,
     activation = activation,
-    width = width,
+    width = widths[length(widths)],
+    widths = widths,
     n_inputs = p,
     input_names = colnames(x),
     centre = centre,
@@ -332,10 +381,16 @@ feature_matrix.bllnn_body <- function(object, newdata = NULL, ...) {
   X <- scale(newdata, center = body$centre, scale = body$scale)
   attributes(X) <- list(dim = dim(X))
   act_f <- activation_fun(body$activation)
-  H <- act_f(X %*% body$params$W1 + rep(body$params$b1, each = nrow(X)))
+
+  # The features are the activations of the LAST hidden layer, which is what
+  # makes this a Bayesian *last* layer. With one hidden layer that is the only
+  # layer; with more, the earlier ones are representation and only the final
+  # one is drawn over.
+  fw <- mlp_forward(body$params, X, act_f)
+  H <- fw$H[[length(fw$H)]]
 
   Phi <- cbind(1, H)
-  colnames(Phi) <- c("intercept", paste0("h", seq_len(body$width)))
+  colnames(Phi) <- c("intercept", paste0("h", seq_len(ncol(H))))
 
   # The confounding channel, if this body was warmed up with linear terms.
   if (!is.null(body$aux)) {
@@ -373,7 +428,8 @@ predict.bllnn_body <- function(object, newdata, ...) {
   # weights for the hidden units alone.
   Phi <- feature_matrix(object, newdata)
   H <- Phi[, seq_len(object$width) + 1L, drop = FALSE]
-  as.vector(H %*% object$params$w2 + object$params$b2) + object$y_centre
+  as.vector(H %*% object$params$w_out + object$params$b_out) +
+    object$y_centre
 }
 
 #' @param x A `bllnn_body` object.
@@ -382,8 +438,9 @@ predict.bllnn_body <- function(object, newdata, ...) {
 #' @export
 print.bllnn_body <- function(x, ...) {
   cat("<bllnn_body>\n")
-  cat(sprintf("  architecture : %d -> %d (%s) -> 1\n",
-              x$n_inputs, x$width, x$activation))
+  cat(sprintf("  architecture : %s (%s)\n",
+              paste(c(x$n_inputs, x$widths, 1), collapse = " -> "),
+              x$activation))
   n_aux <- if (is.null(x$aux)) 0L else length(x$aux)
   cat(sprintf("  features     : %d, including intercept%s\n",
               x$width + 1L + n_aux,

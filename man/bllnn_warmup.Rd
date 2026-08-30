@@ -32,7 +32,10 @@ this is the part of the outcome the body is meant to explain.}
 the conditional mean of that column given \code{x}. Required for causal use;
 omit it when the linear part is absent or known to be independent of \code{x}.}
 
-\item{width}{Number of hidden units.}
+\item{width}{Hidden layer sizes. A single number gives one hidden layer;
+a vector gives one layer per element, so \code{width = c(64, 32)} is a network
+with 64 units then 32. The features handed to the sampler are the
+activations of the last layer, so its size sets the number of features.}
 
 \item{epochs}{Maximum training epochs.}
 
@@ -57,9 +60,9 @@ A \code{bllnn_body} object. Pass it to \code{\link[=feature_matrix]{feature_matr
 frozen features, or straight to \code{\link[=bllnn_sampler]{bllnn_sampler()}} with \code{data}.
 }
 \description{
-Trains a single-hidden-layer network on a seed fold and freezes it. The
-hidden activations become the fixed feature matrix that
-\code{\link[=bllnn_sampler]{bllnn_sampler()}} draws a last layer over.
+Trains a network on a seed fold and freezes it. The activations of its last
+hidden layer become the fixed feature matrix that \code{\link[=bllnn_sampler]{bllnn_sampler()}} draws a
+last layer over.
 }
 \details{
 \strong{Why the body is frozen.} Sampling conditions on the features. If they
