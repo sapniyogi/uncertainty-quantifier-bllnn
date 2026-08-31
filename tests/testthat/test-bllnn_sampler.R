@@ -221,8 +221,11 @@ test_that("every invalid combination in the table is refused", {
   case <- sampler_case()
   tbl <- valid_kernels()
 
-  expect_true(any(tbl$valid))
-  expect_equal(sum(tbl$valid), 1L)
+  # Two valid combinations now: the Gaussian conjugate draw and the logistic
+  # one via Polya-Gamma augmentation. Named rather than counted, so adding a
+  # kernel is a deliberate act that updates this list.
+  expect_setequal(paste(tbl$posterior, tbl$features)[tbl$valid],
+                  c("conjugate frozen", "polyagamma frozen"))
 
   for (i in seq_len(nrow(tbl))) {
     mod <- bllnn_sampler(case$Phi, case$tau2, tbl$posterior[i], tbl$features[i])
@@ -230,8 +233,15 @@ test_that("every invalid combination in the table is refused", {
     # rather than something to compare against the bare table column.
     expect_equal(as.logical(is_valid_kernel(mod)), tbl$valid[i])
 
-    set_response(mod, case$r)
-    set_sigma(mod, case$sigma)
+    # Each posterior takes the response on its own scale: the logistic path
+    # wants the 0/1 outcome itself and has no noise level for the host to own.
+    if (tbl$posterior[i] == "polyagamma") {
+      set_response(mod, rbinom(case$n, 1, 0.5))
+    } else {
+      set_response(mod, case$r)
+      set_sigma(mod, case$sigma)
+    }
+
     if (tbl$valid[i]) {
       expect_no_error(gibbs_step(mod))
     } else {

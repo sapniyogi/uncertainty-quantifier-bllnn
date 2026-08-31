@@ -13,12 +13,13 @@ kernel_table <- function() {
                   "bootstrap", "vi", "sgmcmc"),
     features = c("frozen", "adaptive", "frozen", "frozen",
                  "frozen", "frozen", "frozen"),
-    valid = c(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE),
+    valid = c(TRUE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE),
     reason = c(
       "Exact Gaussian conditional posterior on frozen features.",
       paste("Refitting the features on the response being sampled destroys",
             "the conditional exactness that frozen features buy."),
-      "A valid kernel in principle, but not implemented yet.",
+      paste("Exact via Polya-Gamma augmentation: conditional on the latent",
+            "variables the logistic likelihood is Gaussian in the weights."),
       "Approximate only. Not a conditional distribution, so not a kernel.",
       "Not a conditional distribution. Standalone mode only.",
       "A warm-up objective, not a draw.",
@@ -201,6 +202,8 @@ bllnn_sampler <- function(Phi, tau2 = "auto", posterior = "conjugate",
   mod$Phi_r <- NULL
   mod$sigma <- NULL
   mod$w <- NULL
+  mod$offset <- rep(0, nrow(Phi))
+  mod$omega <- NULL
   mod$n_steps <- 0L
 
   class(mod) <- c("bllnn_sampler", "environment")
@@ -271,7 +274,16 @@ set_response <- function(mod, r) {
                  length(r), mod$n), call. = FALSE)
   }
   mod$r <- as.vector(r)
-  mod$Phi_r <- crossprod(mod$Phi, mod$r)
+  if (mod$posterior == "polyagamma") {
+    if (!all(mod$r %in% c(0, 1))) {
+      stop("With posterior = \"polyagamma\" the response must be 0/1. It is ",
+           "the outcome itself, not a residual: the logistic link has no ",
+           "residual scale to work on.", call. = FALSE)
+    }
+    mod$Phi_r <- NULL
+  } else {
+    mod$Phi_r <- crossprod(mod$Phi, mod$r)
+  }
 
   # Calibrate the prior scale the first time a response arrives. The scale that
   # matters is the one on which f = Phi w lives, so match the implied prior
@@ -280,7 +292,11 @@ set_response <- function(mod, r) {
   # set_response() would let the prior chase the residual it is meant to
   # regularise, and in a Gibbs loop that residual changes every sweep.
   if (mod$tau2_mode != "fixed" && is.na(mod$tau2)) {
-    scale <- stats::var(mod$r) / mean(rowSums(mod$Phi^2))
+    # For the logistic path the response is 0/1 and its variance carries no
+    # scale information, so calibrate against the latent scale instead: the
+    # logistic link puts the linear predictor on roughly unit scale.
+    numer <- if (mod$posterior == "polyagamma") 1 else stats::var(mod$r)
+    scale <- numer / mean(rowSums(mod$Phi^2))
     if (!is.finite(scale) || scale <= 0) scale <- 1
     if (mod$tau2_mode == "auto") {
       mod$tau2 <- scale
@@ -382,7 +398,7 @@ gibbs_step <- function(mod, force = FALSE) {
     stop("No residual set. Call set_response(mod, r) before gibbs_step().",
          call. = FALSE)
   }
-  if (is.null(mod$sigma)) {
+  if (mod$posterior != "polyagamma" && is.null(mod$sigma)) {
     stop("No noise level set. Call set_sigma(mod, s) before gibbs_step().",
          call. = FALSE)
   }
@@ -403,8 +419,30 @@ gibbs_step <- function(mod, force = FALSE) {
     mod$prior_precision <- mod$identity / mod$tau2
   }
 
-  post <- conjugate_moments_core(mod$cross, mod$Phi_r, mod$prior_precision,
-                                 mod$sigma)
+  if (mod$posterior == "polyagamma") {
+    # Polson, Scott and Windle (2013). With psi = offset + Phi w, drawing
+    #   omega_i | w  ~ PG(1, psi_i)
+    #   w | omega, y ~ N(V Phi' z, V),  V = (Phi' Omega Phi + I/tau2)^-1
+    # where z_i = y_i - 1/2 - omega_i * offset_i, is an exact Gibbs sweep.
+    # Neither step approximates anything, which is what keeps this a valid
+    # kernel rather than a Metropolis or variational substitute.
+    w_prev <- if (is.null(mod$w)) rep(0, mod$m) else mod$w
+    psi <- mod$offset + as.vector(mod$Phi %*% w_prev)
+
+    omega <- rpolyagamma(mod$n, psi)
+    mod$omega <- omega
+
+    precision <- crossprod(mod$Phi, mod$Phi * omega) + mod$prior_precision
+    covariance <- solve(precision)
+    covariance <- (covariance + t(covariance)) / 2
+    kappa <- mod$r - 0.5 - omega * mod$offset
+    mu <- as.vector(covariance %*% crossprod(mod$Phi, kappa))
+
+    post <- list(mean = mu, cov = covariance, precision = precision)
+  } else {
+    post <- conjugate_moments_core(mod$cross, mod$Phi_r, mod$prior_precision,
+                                   mod$sigma)
+  }
   w <- draw_from_moments(post, colnames(mod$Phi))
 
   mod$w <- w
@@ -439,4 +477,44 @@ print.bllnn_sampler <- function(x, ...) {
               if (is.null(x$sigma)) "not set" else format(x$sigma)))
   cat(sprintf("  steps taken: %d\n", x$n_steps))
   invisible(x)
+}
+
+#' Set the offset for the logistic path
+#'
+#' The part of the linear predictor that does not come from the features, most
+#' often `X beta` from the host. Modifies `mod` in place.
+#'
+#' @details
+#' The conjugate path works on a residual: the host subtracts its own
+#' contribution and hands over what is left. Under the logistic link that is
+#' not possible -- there is no scale on which to subtract, because the outcome
+#' is 0 or 1 and the link is nonlinear. So the host passes its contribution as
+#' an offset instead, and the block conditions on it. The default is zero.
+#'
+#' @param mod A `bllnn_sampler` object.
+#' @param o Numeric vector of length `n`, or a single number recycled.
+#'
+#' @return `mod`, invisibly.
+#'
+#' @examples
+#' set.seed(1)
+#' Phi <- matrix(rnorm(60 * 3), 60, 3)
+#' mod <- bllnn_sampler(Phi, tau2 = 1, posterior = "polyagamma")
+#' set_response(mod, rbinom(60, 1, 0.5))
+#' set_offset(mod, rnorm(60, sd = 0.2))
+#' length(gibbs_step(mod))
+#'
+#' @seealso [set_response()], [gibbs_step()]
+#' @export
+set_offset <- function(mod, o) {
+  stop_if_not_sampler(mod)
+  if (!is.numeric(o) || anyNA(o)) {
+    stop("`o` must be a numeric vector with no NAs.", call. = FALSE)
+  }
+  if (length(o) != 1 && length(o) != mod$n) {
+    stop(sprintf("`o` has length %d but this sampler was built on %d rows.",
+                 length(o), mod$n), call. = FALSE)
+  }
+  mod$offset <- rep_len(as.vector(o), mod$n)
+  invisible(mod)
 }
