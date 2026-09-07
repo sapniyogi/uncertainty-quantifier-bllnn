@@ -4,20 +4,30 @@
 \alias{rpolyagamma}
 \title{Draw from the Polya-Gamma distribution}
 \usage{
-rpolyagamma(n, z = 0)
+rpolyagamma(n, z = 0, b = 1)
 }
 \arguments{
 \item{n}{Number of draws, or omit and pass a vector \code{z}.}
 
 \item{z}{Tilting parameter. Recycled to length \code{n}; a vector gives one draw
 per element.}
+
+\item{b}{Shape, a positive integer or a vector of them. \code{PG(b, z)} is the
+sum of \code{b} independent \code{PG(1, z)} draws, so integer shapes are exact by
+construction. Binary outcomes need \code{b = 1}; negative-binomial counts need
+\code{b = y + r}. Non-integer shapes are refused rather than approximated --
+they need a different sampler, and silently rounding would be the kind of
+quiet inexactness this routine exists to avoid.
+
+Cost is linear in \code{b}, so a count response with large values is
+correspondingly slower.}
 }
 \value{
 A numeric vector of draws.
 }
 \description{
-Exact draws from \code{PG(1, z)}, the augmentation that makes logistic
-likelihoods conditionally Gaussian.
+Exact draws from \code{PG(b, z)}, the augmentation that makes logistic and
+negative-binomial likelihoods conditionally Gaussian.
 }
 \details{
 \strong{What it is for.} For a binary outcome the likelihood contribution is

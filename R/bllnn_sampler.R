@@ -90,6 +90,14 @@ stop_if_not_sampler <- function(mod) {
 #' @param tau2_shape Shape of the inverse-gamma hyperprior used by
 #'   `tau2 = "sample"`. Must exceed 1 so the prior has a finite mean. The
 #'   default of 2 gives a finite mean and infinite variance.
+#' @param dispersion Negative-binomial dispersion `r`, for count outcomes under
+#'   `posterior = "polyagamma"`. `NULL` (the default) gives the Bernoulli model
+#'   and a 0/1 response. Setting it gives the count model and a non-negative
+#'   integer response.
+#'
+#'   Must be a positive integer, and is not estimated. The augmentation needs
+#'   `PG(y + r, psi)`, which is exact only for whole `r`; profile over a few
+#'   values rather than expecting the sampler to learn it.
 #' @param posterior Which posterior to draw from. Only `"conjugate"` is
 #'   implemented; the other names in [valid_kernels()] are accepted so that
 #'   [is_valid_kernel()] can report on them.
@@ -116,7 +124,7 @@ stop_if_not_sampler <- function(mod) {
 #' @export
 bllnn_sampler <- function(Phi, tau2 = "auto", posterior = "conjugate",
                           features = "frozen", data = NULL,
-                          tau2_shape = 2) {
+                          tau2_shape = 2, dispersion = NULL) {
   if (inherits(Phi, "bllnn_crossfit")) {
     if (!is.null(data)) {
       stop("A bllnn_crossfit already carries its features, so `data` is not ",
@@ -162,6 +170,21 @@ bllnn_sampler <- function(Phi, tau2 = "auto", posterior = "conjugate",
     stop("`posterior` must be one of: ",
          paste(known_posteriors(), collapse = ", "), ".", call. = FALSE)
   }
+  if (!is.null(dispersion)) {
+    if (posterior != "polyagamma") {
+      stop("`dispersion` applies only to posterior = \"polyagamma\", where it ",
+           "selects the negative-binomial count model.", call. = FALSE)
+    }
+    if (!is.numeric(dispersion) || length(dispersion) != 1 ||
+        is.na(dispersion) || dispersion < 1 ||
+        dispersion != round(dispersion)) {
+      stop("`dispersion` must be a single positive integer. The augmentation ",
+           "needs PG(y + r, psi), which is exact only for whole r; a ",
+           "non-integer dispersion needs a different sampler and is not ",
+           "supported. It is also not estimated -- fix it, or profile over a ",
+           "few values.", call. = FALSE)
+    }
+  }
   if (!is.character(features) || length(features) != 1 ||
       !features %in% known_features()) {
     stop("`features` must be one of: ",
@@ -182,6 +205,7 @@ bllnn_sampler <- function(Phi, tau2 = "auto", posterior = "conjugate",
   mod$tau2_mode <- tau2_mode
   mod$tau2_shape <- tau2_shape
   mod$tau2_rate <- NA_real_
+  mod$dispersion <- dispersion
   mod$posterior <- posterior
   mod$features <- features
   mod$valid <- if (length(hit) == 1) tbl$valid[hit] else FALSE
@@ -275,10 +299,16 @@ set_response <- function(mod, r) {
   }
   mod$r <- as.vector(r)
   if (mod$posterior == "polyagamma") {
-    if (!all(mod$r %in% c(0, 1))) {
-      stop("With posterior = \"polyagamma\" the response must be 0/1. It is ",
-           "the outcome itself, not a residual: the logistic link has no ",
-           "residual scale to work on.", call. = FALSE)
+    if (is.null(mod$dispersion)) {
+      if (!all(mod$r %in% c(0, 1))) {
+        stop("With posterior = \"polyagamma\" and no `dispersion` the ",
+             "response must be 0/1. It is the outcome itself, not a residual: ",
+             "the logistic link has no residual scale to work on. For counts, ",
+             "set `dispersion`.", call. = FALSE)
+      }
+    } else if (any(mod$r < 0) || any(mod$r != round(mod$r))) {
+      stop("With `dispersion` set the response must be non-negative counts.",
+           call. = FALSE)
     }
     mod$Phi_r <- NULL
   } else {
@@ -429,13 +459,24 @@ gibbs_step <- function(mod, force = FALSE) {
     w_prev <- if (is.null(mod$w)) rep(0, mod$m) else mod$w
     psi <- mod$offset + as.vector(mod$Phi %*% w_prev)
 
-    omega <- rpolyagamma(mod$n, psi)
+    # Bernoulli: likelihood e^{y psi} / (1 + e^psi), so b = 1, kappa = y - 1/2.
+    # Negative binomial with dispersion r: e^{y psi} / (1 + e^psi)^{y + r}, so
+    # b = y + r and kappa = (y - r)/2. Same identity, different exponent.
+    if (is.null(mod$dispersion)) {
+      shape <- rep(1L, mod$n)
+      kappa0 <- mod$r - 0.5
+    } else {
+      shape <- mod$r + mod$dispersion
+      kappa0 <- (mod$r - mod$dispersion) / 2
+    }
+
+    omega <- rpolyagamma(mod$n, psi, b = shape)
     mod$omega <- omega
 
     precision <- crossprod(mod$Phi, mod$Phi * omega) + mod$prior_precision
     covariance <- solve(precision)
     covariance <- (covariance + t(covariance)) / 2
-    kappa <- mod$r - 0.5 - omega * mod$offset
+    kappa <- kappa0 - omega * mod$offset
     mu <- as.vector(covariance %*% crossprod(mod$Phi, kappa))
 
     post <- list(mean = mu, cov = covariance, precision = precision)

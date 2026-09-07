@@ -111,8 +111,8 @@ rpg1_one <- function(z) {
 
 #' Draw from the Polya-Gamma distribution
 #'
-#' Exact draws from `PG(1, z)`, the augmentation that makes logistic
-#' likelihoods conditionally Gaussian.
+#' Exact draws from `PG(b, z)`, the augmentation that makes logistic and
+#' negative-binomial likelihoods conditionally Gaussian.
 #'
 #' @details
 #'
@@ -138,6 +138,15 @@ rpg1_one <- function(z) {
 #' @param n Number of draws, or omit and pass a vector `z`.
 #' @param z Tilting parameter. Recycled to length `n`; a vector gives one draw
 #'   per element.
+#' @param b Shape, a positive integer or a vector of them. `PG(b, z)` is the
+#'   sum of `b` independent `PG(1, z)` draws, so integer shapes are exact by
+#'   construction. Binary outcomes need `b = 1`; negative-binomial counts need
+#'   `b = y + r`. Non-integer shapes are refused rather than approximated --
+#'   they need a different sampler, and silently rounding would be the kind of
+#'   quiet inexactness this routine exists to avoid.
+#'
+#'   Cost is linear in `b`, so a count response with large values is
+#'   correspondingly slower.
 #'
 #' @return A numeric vector of draws.
 #'
@@ -155,13 +164,18 @@ rpg1_one <- function(z) {
 #' vapply(c(0, 1, 4), function(z) mean(rpolyagamma(500, z)), numeric(1))
 #'
 #' @export
-rpolyagamma <- function(n, z = 0) {
-  if (missing(n)) n <- length(z)
+rpolyagamma <- function(n, z = 0, b = 1) {
+  if (missing(n)) n <- max(length(z), length(b))
   if (!is.numeric(n) || length(n) != 1 || is.na(n) || n < 0 || n != round(n)) {
     stop("`n` must be a single non-negative integer.", call. = FALSE)
   }
   if (!is.numeric(z) || anyNA(z)) {
     stop("`z` must be numeric with no NAs.", call. = FALSE)
+  }
+  if (!is.numeric(b) || anyNA(b) || any(b < 1) || any(b != round(b))) {
+    stop("`b` must be positive integers. PG(b, z) is the sum of b draws from ",
+         "PG(1, z), which is exact only for whole b; non-integer shapes need ",
+         "a different sampler and are not supported.", call. = FALSE)
   }
   n <- as.integer(n)
   if (n == 0L) return(numeric(0))
@@ -172,40 +186,52 @@ rpolyagamma <- function(n, z = 0) {
     }
     z <- rep_len(z, n)
   }
-  vapply(z, rpg1_one, numeric(1))
+  b <- rep_len(as.integer(b), n)
+
+  out <- numeric(n)
+  for (i in seq_len(n)) {
+    acc <- 0
+    for (j in seq_len(b[i])) acc <- acc + rpg1_one(z[i])
+    out[i] <- acc
+  }
+  out
 }
 
-#' Mean of PG(1, z)
+#' Mean of PG(b, z)
 #'
 #' Closed form, used to check the sampler and available for diagnostics.
 #'
 #' @param z Tilting parameter.
+#' @param b Shape. The mean is linear in it.
 #'
-#' @return `tanh(z / 2) / (2 z)`, with the limit `1/4` taken at zero.
+#' @return `b * tanh(z / 2) / (2 z)`, with the limit `b/4` taken at zero.
 #'
 #' @examples
 #' pg_mean(c(0, 1, 4))
+#' pg_mean(1, b = 5)
 #'
 #' @export
-pg_mean <- function(z) {
+pg_mean <- function(z, b = 1) {
   z <- abs(z)
-  out <- ifelse(z < 1e-8, 0.25, tanh(z / 2) / (2 * pmax(z, 1e-300)))
-  out
+  b * ifelse(z < 1e-8, 0.25, tanh(z / 2) / (2 * pmax(z, 1e-300)))
 }
 
-#' Variance of PG(1, z)
+#' Variance of PG(b, z)
 #'
 #' @param z Tilting parameter.
+#' @param b Shape. Draws are sums of `b` independent PG(1, z) variables, so the
+#'   variance is linear in it too.
 #'
-#' @return The variance, with the limit `1/24` taken at zero.
+#' @return The variance, with the limit `b/24` taken at zero.
 #'
 #' @examples
 #' pg_var(c(0, 1, 4))
+#' pg_var(1, b = 5)
 #'
 #' @export
-pg_var <- function(z) {
+pg_var <- function(z, b = 1) {
   z <- abs(z)
   safe <- pmax(z, 1e-300)
   out <- (sinh(safe) - safe) / (4 * safe^3 * cosh(safe / 2)^2)
-  ifelse(z < 1e-4, 1 / 24, out)
+  b * ifelse(z < 1e-4, 1 / 24, out)
 }

@@ -298,3 +298,136 @@ test_that("tau2 auto calibrates on the latent scale for binary outcomes", {
   expect_true(is.finite(mod$tau2) && mod$tau2 > 0)
   expect_no_error(gibbs_step(mod))
 })
+
+# --- integer shapes, for count outcomes -------------------------------------
+
+test_that("PG(b, z) has the moments of a sum of b independent PG(1, z)", {
+  set.seed(11)
+  n <- 8000
+  for (b in c(1, 3, 7)) {
+    for (z in c(0, 2)) {
+      d <- rpolyagamma(n, z, b = b)
+      expect_lt(abs(mean(d) - pg_mean(z, b)), 4 * sqrt(pg_var(z, b) / n),
+                label = paste("mean at b =", b, "z =", z))
+      expect_equal(var(d), pg_var(z, b), tolerance = 0.06,
+                   info = paste("variance at b =", b, "z =", z))
+    }
+  }
+  # Both moments are linear in b, because the draw is a sum.
+  expect_equal(pg_mean(2, 5), 5 * pg_mean(2, 1))
+  expect_equal(pg_var(2, 5), 5 * pg_var(2, 1))
+})
+
+test_that("a vector shape gives one draw per element", {
+  set.seed(12)
+  d <- rpolyagamma(4000, z = 1, b = rep(c(1, 6), each = 2000))
+  expect_lt(abs(mean(d[1:2000]) - pg_mean(1, 1)), 0.02)
+  expect_lt(abs(mean(d[2001:4000]) - pg_mean(1, 6)), 0.05)
+})
+
+test_that("non-integer shapes are refused rather than rounded", {
+  # PG(b, z) as a sum of PG(1, z) is exact only for whole b. Rounding would be
+  # precisely the quiet inexactness the exact sampler exists to avoid.
+  expect_error(rpolyagamma(5, 1, b = 2.5), "positive integers")
+  expect_error(rpolyagamma(5, 1, b = 0), "positive integers")
+  expect_error(rpolyagamma(5, 1, b = -1), "positive integers")
+  expect_error(rpolyagamma(5, 1, b = NA), "positive integers")
+})
+
+# --- the negative-binomial posterior ---------------------------------------
+
+test_that("count outcomes recover the maximum likelihood fit", {
+  # glm() with a known theta is the independent check. Note the link: MASS's
+  # negative.binomial family uses a log link, so it fits
+  #   log(mean) = log(r) + psi
+  # while the augmentation works on psi directly, because
+  #   mean = r * p / (1 - p)  and  p = plogis(psi)  give  mean = r * exp(psi).
+  # Slopes therefore agree exactly and the intercept differs by log(r). That
+  # is a difference of parameterisation, not of fit, and comparing without the
+  # shift makes the implementation look badly wrong when it is correct.
+  skip_on_cran()
+  # MASS is in Suggests, not Imports: it is a yardstick for one test, not
+  # something the package needs to work. Guarded so a clean install without it
+  # skips rather than errors.
+  skip_if_not_installed("MASS")
+  set.seed(1)
+  n <- 500
+  r <- 3
+  Phi <- cbind(intercept = 1, matrix(rnorm(n * 2), n, 2,
+                                     dimnames = list(NULL, c("h1", "h2"))))
+  w <- c(0.4, 0.9, -0.6)
+  psi <- as.vector(Phi %*% w)
+  y <- rnbinom(n, size = r, prob = 1 - stats::plogis(psi))
+
+  mod <- bllnn_sampler(Phi, tau2 = 100, posterior = "polyagamma",
+                       dispersion = r)
+  expect_true(is_valid_kernel(mod))
+  set_response(mod, y)
+
+  W <- matrix(NA_real_, 1500, 3)
+  for (i in seq_len(1500)) {
+    gibbs_step(mod)
+    W[i, ] <- mod$w
+  }
+  post <- colMeans(W[-(1:500), , drop = FALSE])
+
+  mle <- unname(coef(stats::glm(y ~ Phi[, -1],
+                                family = MASS::negative.binomial(theta = r))))
+
+  cat(sprintf("\n[negbin] posterior %s\n         glm+log(r) %s\n",
+              paste(sprintf("%6.3f", post), collapse = " "),
+              paste(sprintf("%6.3f", mle - c(log(r), 0, 0)), collapse = " ")))
+
+  # Compare on the augmentation's own scale by removing the log(r) offset.
+  expect_equal(post, mle - c(log(r), 0, 0), tolerance = 0.1)
+})
+
+test_that("the shape passed to the augmentation is y + r", {
+  # The whole difference between the binary and count models is the exponent
+  # in the likelihood, which becomes the PG shape. If this were wrong the fit
+  # would still run and simply be wrong.
+  set.seed(2)
+  n <- 200
+  r <- 4
+  Phi <- cbind(1, matrix(rnorm(n * 2), n, 2))
+  y <- rnbinom(n, size = r, prob = 0.5)
+
+  mod <- bllnn_sampler(Phi, tau2 = 10, posterior = "polyagamma",
+                       dispersion = r)
+  set_response(mod, y)
+  mod$w <- rep(0, ncol(Phi))          # psi = 0, so E[omega_i] = (y_i + r)/4
+
+  acc <- numeric(n)
+  reps <- 200
+  set.seed(3)
+  for (i in seq_len(reps)) {
+    mod$w <- rep(0, ncol(Phi))
+    gibbs_step(mod)
+    acc <- acc + mod$omega
+  }
+  expected <- pg_mean(0, b = y + r)
+  se <- sqrt(pg_var(0, b = y + r) / reps)
+  expect_lt(max(abs(acc / reps - expected) / se), 4)
+})
+
+test_that("dispersion is validated and confined to the logistic path", {
+  set.seed(4)
+  Phi <- cbind(1, matrix(rnorm(200), 100, 2))
+
+  expect_error(bllnn_sampler(Phi, tau2 = 1, dispersion = 3),
+               "applies only to posterior")
+  expect_error(bllnn_sampler(Phi, tau2 = 1, posterior = "polyagamma",
+                             dispersion = 2.5), "positive integer")
+  expect_error(bllnn_sampler(Phi, tau2 = 1, posterior = "polyagamma",
+                             dispersion = 0), "positive integer")
+
+  # With a dispersion the response is counts; without it, 0/1.
+  count_mod <- bllnn_sampler(Phi, tau2 = 1, posterior = "polyagamma",
+                             dispersion = 2)
+  expect_error(set_response(count_mod, rnorm(100)), "non-negative counts")
+  expect_no_error(set_response(count_mod, rpois(100, 3)))
+
+  binary_mod <- bllnn_sampler(Phi, tau2 = 1, posterior = "polyagamma")
+  expect_error(set_response(binary_mod, rpois(100, 3)), "must be 0/1")
+  expect_no_error(set_response(binary_mod, rbinom(100, 1, 0.5)))
+})

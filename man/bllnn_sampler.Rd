@@ -11,7 +11,8 @@ bllnn_sampler(
   posterior = "conjugate",
   features = "frozen",
   data = NULL,
-  tau2_shape = 2
+  tau2_shape = 2,
+  dispersion = NULL
 )
 
 \method{print}{bllnn_sampler}(x, ...)
@@ -49,6 +50,15 @@ implemented; the other names in \code{\link[=valid_kernels]{valid_kernels()}} ar
 \item{tau2_shape}{Shape of the inverse-gamma hyperprior used by
 \code{tau2 = "sample"}. Must exceed 1 so the prior has a finite mean. The
 default of 2 gives a finite mean and infinite variance.}
+
+\item{dispersion}{Negative-binomial dispersion \code{r}, for count outcomes under
+\code{posterior = "polyagamma"}. \code{NULL} (the default) gives the Bernoulli model
+and a 0/1 response. Setting it gives the count model and a non-negative
+integer response.
+
+Must be a positive integer, and is not estimated. The augmentation needs
+\code{PG(y + r, psi)}, which is exact only for whole \code{r}; profile over a few
+values rather than expecting the sampler to learn it.}
 
 \item{x}{A \code{bllnn_sampler} object.}
 

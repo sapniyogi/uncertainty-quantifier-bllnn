@@ -2,20 +2,23 @@
 % Please edit documentation in R/polyagamma.R
 \name{pg_mean}
 \alias{pg_mean}
-\title{Mean of PG(1, z)}
+\title{Mean of PG(b, z)}
 \usage{
-pg_mean(z)
+pg_mean(z, b = 1)
 }
 \arguments{
 \item{z}{Tilting parameter.}
+
+\item{b}{Shape. The mean is linear in it.}
 }
 \value{
-\verb{tanh(z / 2) / (2 z)}, with the limit \code{1/4} taken at zero.
+\verb{b * tanh(z / 2) / (2 z)}, with the limit \code{b/4} taken at zero.
 }
 \description{
 Closed form, used to check the sampler and available for diagnostics.
 }
 \examples{
 pg_mean(c(0, 1, 4))
+pg_mean(1, b = 5)
 
 }

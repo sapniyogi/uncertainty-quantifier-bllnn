@@ -2,20 +2,24 @@
 % Please edit documentation in R/polyagamma.R
 \name{pg_var}
 \alias{pg_var}
-\title{Variance of PG(1, z)}
+\title{Variance of PG(b, z)}
 \usage{
-pg_var(z)
+pg_var(z, b = 1)
 }
 \arguments{
 \item{z}{Tilting parameter.}
+
+\item{b}{Shape. Draws are sums of \code{b} independent PG(1, z) variables, so the
+variance is linear in it too.}
 }
 \value{
-The variance, with the limit \code{1/24} taken at zero.
+The variance, with the limit \code{b/24} taken at zero.
 }
 \description{
-Variance of PG(1, z)
+Variance of PG(b, z)
 }
 \examples{
 pg_var(c(0, 1, 4))
+pg_var(1, b = 5)
 
 }
