@@ -5,8 +5,10 @@
 # inside its own loop and must not have to reassign the object every sweep.
 
 # Which posterior/feature combinations are legitimate Gibbs transition kernels.
-# Only conjugate/frozen is usable today. The rest are listed so the guard
-# refuses them by name and can say why, rather than failing obscurely later.
+# conjugate/frozen and polyagamma/frozen are the valid ones. laplace/frozen is
+# implemented but deliberately stays invalid -- it is usable one-shot, never as
+# a kernel. The rest are listed so the guard refuses them by name and can say
+# why, rather than failing obscurely later.
 kernel_table <- function() {
   data.frame(
     posterior = c("conjugate", "conjugate", "polyagamma", "laplace",
@@ -20,7 +22,10 @@ kernel_table <- function() {
             "the conditional exactness that frozen features buy."),
       paste("Exact via Polya-Gamma augmentation: conditional on the latent",
             "variables the logistic likelihood is Gaussian in the weights."),
-      "Approximate only. Not a conditional distribution, so not a kernel.",
+      paste("Approximate only: a Gaussian fitted at the mode is not the",
+            "conditional distribution of the weights, so iterating it leaves",
+            "nothing invariant. Implemented for one-shot use, via",
+            "laplace_moments() and laplace_draw()."),
       "Not a conditional distribution. Standalone mode only.",
       "A warm-up objective, not a draw.",
       "Correct only asymptotically. Research mode, with documented bias."
@@ -98,9 +103,16 @@ stop_if_not_sampler <- function(mod) {
 #'   Must be a positive integer, and is not estimated. The augmentation needs
 #'   `PG(y + r, psi)`, which is exact only for whole `r`; profile over a few
 #'   values rather than expecting the sampler to learn it.
-#' @param posterior Which posterior to draw from. Only `"conjugate"` is
-#'   implemented; the other names in [valid_kernels()] are accepted so that
-#'   [is_valid_kernel()] can report on them.
+#' @param posterior Which posterior to draw from. `"conjugate"` (Gaussian
+#'   outcome), `"polyagamma"` (binary, or counts with `dispersion`) and
+#'   `"laplace"` (approximate, needing `force = TRUE`) are implemented. The
+#'   remaining names in [valid_kernels()] are accepted so that
+#'   [is_valid_kernel()] can report on them, and nothing more.
+#' @param family Outcome model for `posterior = "laplace"`, one of
+#'   `"gaussian"`, `"binomial"` or `"poisson"`; defaults to `"gaussian"` and is
+#'   refused for any other posterior. Poisson counts are reachable only this
+#'   way, since the Polya-Gamma identity does not cover them. See
+#'   [laplace_moments()].
 #' @param features Whether features stay fixed during sampling. Only
 #'   `"frozen"` gives a valid kernel.
 #'
@@ -124,7 +136,8 @@ stop_if_not_sampler <- function(mod) {
 #' @export
 bllnn_sampler <- function(Phi, tau2 = "auto", posterior = "conjugate",
                           features = "frozen", data = NULL,
-                          tau2_shape = 2, dispersion = NULL) {
+                          tau2_shape = 2, dispersion = NULL,
+                          family = NULL) {
   if (inherits(Phi, "bllnn_crossfit")) {
     if (!is.null(data)) {
       stop("A bllnn_crossfit already carries its features, so `data` is not ",
@@ -190,6 +203,18 @@ bllnn_sampler <- function(Phi, tau2 = "auto", posterior = "conjugate",
     stop("`features` must be one of: ",
          paste(known_features(), collapse = ", "), ".", call. = FALSE)
   }
+  if (posterior == "laplace") {
+    if (is.null(family)) family <- "gaussian"
+    if (!is.character(family) || length(family) != 1 ||
+        !family %in% laplace_families()) {
+      stop("`family` must be one of: ",
+           paste(laplace_families(), collapse = ", "), ".", call. = FALSE)
+    }
+  } else if (!is.null(family)) {
+    stop("`family` applies only to posterior = \"laplace\". The conjugate ",
+         "path is Gaussian by construction, and \"polyagamma\" selects its ",
+         "outcome model with `dispersion`.", call. = FALSE)
+  }
 
   m <- ncol(Phi)
   tbl <- kernel_table()
@@ -206,6 +231,7 @@ bllnn_sampler <- function(Phi, tau2 = "auto", posterior = "conjugate",
   mod$tau2_shape <- tau2_shape
   mod$tau2_rate <- NA_real_
   mod$dispersion <- dispersion
+  mod$family <- family
   mod$posterior <- posterior
   mod$features <- features
   mod$valid <- if (length(hit) == 1) tbl$valid[hit] else FALSE
@@ -312,6 +338,22 @@ set_response <- function(mod, r) {
     }
     mod$Phi_r <- NULL
   } else {
+    # The same trap as above, for the same reason: under a non-identity link
+    # there is no scale on which the host can subtract its own contribution,
+    # so the response is the outcome and the host's part arrives via
+    # set_offset(). Worth catching here rather than inside the Newton step.
+    if (mod$posterior == "laplace" && mod$family == "binomial" &&
+        !all(mod$r %in% c(0, 1))) {
+      stop("With posterior = \"laplace\" and family = \"binomial\" the ",
+           "response must be 0/1. It is the outcome itself, not a residual; ",
+           "pass the host's contribution to set_offset().", call. = FALSE)
+    }
+    if (mod$posterior == "laplace" && mod$family == "poisson" &&
+        (any(mod$r < 0) || any(mod$r != round(mod$r)))) {
+      stop("With posterior = \"laplace\" and family = \"poisson\" the ",
+           "response must be non-negative counts, not a residual.",
+           call. = FALSE)
+    }
     mod$Phi_r <- crossprod(mod$Phi, mod$r)
   }
 
@@ -325,7 +367,9 @@ set_response <- function(mod, r) {
     # For the logistic path the response is 0/1 and its variance carries no
     # scale information, so calibrate against the latent scale instead: the
     # logistic link puts the linear predictor on roughly unit scale.
-    numer <- if (mod$posterior == "polyagamma") 1 else stats::var(mod$r)
+    latent_scale <- mod$posterior == "polyagamma" ||
+      (mod$posterior == "laplace" && mod$family != "gaussian")
+    numer <- if (latent_scale) 1 else stats::var(mod$r)
     scale <- numer / mean(rowSums(mod$Phi^2))
     if (!is.finite(scale) || scale <= 0) scale <- 1
     if (mod$tau2_mode == "auto") {
@@ -428,7 +472,11 @@ gibbs_step <- function(mod, force = FALSE) {
     stop("No residual set. Call set_response(mod, r) before gibbs_step().",
          call. = FALSE)
   }
-  if (mod$posterior != "polyagamma" && is.null(mod$sigma)) {
+  # Only the paths with a free noise scale need one. The logistic and Poisson
+  # likelihoods fix their own variance given the mean.
+  needs_sigma <- mod$posterior == "conjugate" ||
+    (mod$posterior == "laplace" && mod$family == "gaussian")
+  if (needs_sigma && is.null(mod$sigma)) {
     stop("No noise level set. Call set_sigma(mod, s) before gibbs_step().",
          call. = FALSE)
   }
@@ -480,6 +528,15 @@ gibbs_step <- function(mod, force = FALSE) {
     mu <- as.vector(covariance %*% crossprod(mod$Phi, kappa))
 
     post <- list(mean = mu, cov = covariance, precision = precision)
+  } else if (mod$posterior == "laplace") {
+    # Reachable only under force = TRUE, and the guard above has already said
+    # why. The mode and its curvature are refits from scratch each call, since
+    # both move with the response; there is no precomputation to exploit here
+    # beyond Phi itself, which is the honest cost of leaving the conjugate
+    # family.
+    post <- laplace_moments(mod$Phi, mod$r, mod$tau2, family = mod$family,
+                            sigma = if (mod$family == "gaussian") mod$sigma,
+                            offset = mod$offset)
   } else {
     post <- conjugate_moments_core(mod$cross, mod$Phi_r, mod$prior_precision,
                                    mod$sigma)
@@ -500,7 +557,8 @@ gibbs_step <- function(mod, force = FALSE) {
 print.bllnn_sampler <- function(x, ...) {
   cat("<bllnn_sampler>\n")
   cat(sprintf("  features   : %d x %d, %s\n", x$n, x$m, x$features))
-  cat(sprintf("  posterior  : %s\n", x$posterior))
+  cat(sprintf("  posterior  : %s%s\n", x$posterior,
+              if (is.null(x$family)) "" else sprintf(" (%s)", x$family)))
   cat(sprintf("  prior      : w ~ N(0, %s I)%s\n",
               if (is.na(x$tau2)) "tau2" else format(x$tau2, digits = 4),
               switch(x$tau2_mode,

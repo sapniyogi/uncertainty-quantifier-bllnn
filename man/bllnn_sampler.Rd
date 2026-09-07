@@ -12,7 +12,8 @@ bllnn_sampler(
   features = "frozen",
   data = NULL,
   tau2_shape = 2,
-  dispersion = NULL
+  dispersion = NULL,
+  family = NULL
 )
 
 \method{print}{bllnn_sampler}(x, ...)
@@ -37,9 +38,11 @@ to live to explain the residual. That is empirical Bayes on the scale
 only; with \code{"sample"} the shape is fixed and the data move \code{tau2} from
 there.}
 
-\item{posterior}{Which posterior to draw from. Only \code{"conjugate"} is
-implemented; the other names in \code{\link[=valid_kernels]{valid_kernels()}} are accepted so that
-\code{\link[=is_valid_kernel]{is_valid_kernel()}} can report on them.}
+\item{posterior}{Which posterior to draw from. \code{"conjugate"} (Gaussian
+outcome), \code{"polyagamma"} (binary, or counts with \code{dispersion}) and
+\code{"laplace"} (approximate, needing \code{force = TRUE}) are implemented. The
+remaining names in \code{\link[=valid_kernels]{valid_kernels()}} are accepted so that
+\code{\link[=is_valid_kernel]{is_valid_kernel()}} can report on them, and nothing more.}
 
 \item{features}{Whether features stay fixed during sampling. Only
 \code{"frozen"} gives a valid kernel.}
@@ -59,6 +62,12 @@ integer response.
 Must be a positive integer, and is not estimated. The augmentation needs
 \code{PG(y + r, psi)}, which is exact only for whole \code{r}; profile over a few
 values rather than expecting the sampler to learn it.}
+
+\item{family}{Outcome model for \code{posterior = "laplace"}, one of
+\code{"gaussian"}, \code{"binomial"} or \code{"poisson"}; defaults to \code{"gaussian"} and is
+refused for any other posterior. Poisson counts are reachable only this
+way, since the Polya-Gamma identity does not cover them. See
+\code{\link[=laplace_moments]{laplace_moments()}}.}
 
 \item{x}{A \code{bllnn_sampler} object.}
 
