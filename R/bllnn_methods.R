@@ -201,6 +201,15 @@ print.summary.bllnn_fit <- function(x, ...) {
 #' to leak and every body is a legitimate estimate of `f`. Averaging them is an
 #' ensemble, not a workaround.
 #'
+#' `type = "response"` on new data needs the linear terms as well, and needs
+#' them on the scale the model was fitted on. The model is fitted against
+#' `X - E[X | Z]`, so the prediction subtracts the same quantity, averaged over
+#' folds exactly as `f` is. Using the raw column instead would shift every
+#' prediction by `beta * E[X | Z]`. The auxiliary bodies supply `E[X | Z]` for
+#' rows they never saw, so nothing additional is estimated -- and it follows
+#' that a fit built without `linear` cannot do this, and says so rather than
+#' guessing.
+#'
 #' @param object A `bllnn_fit`.
 #' @param newdata Optional data frame. Without it, fitted values for the rows
 #'   the model was fitted to.
@@ -267,12 +276,22 @@ predict.bllnn_fit <- function(object, newdata = NULL,
     n_keep <- nrow(object$beta)
     if (n_keep == 0) n_keep <- length(object$sigma2)
 
-    # Average each fold's body over the folds; see Details.
+    # Average each fold's body over the folds; see Details. The same pass also
+    # yields E[X | Z] for the new rows, because feature_matrix() appends those
+    # columns for any body warmed up with linear terms -- nothing extra has to
+    # be estimated to residualise.
     acc <- matrix(0, nrow = n_keep, ncol = nrow(Znew))
+    ehat_acc <- NULL
     for (k in seq_len(cf$n_folds)) {
       Phi_k <- feature_matrix(cf$bodies[[k]], Znew)
       cols <- seq_len(m_k) + (k - 1) * m_k
       acc <- acc + object$f_weight_draws[, cols, drop = FALSE] %*% t(Phi_k)
+
+      is_ehat <- grepl("^ehat_", colnames(Phi_k))
+      if (any(is_ehat)) {
+        block <- Phi_k[, is_ehat, drop = FALSE]
+        ehat_acc <- if (is.null(ehat_acc)) block else ehat_acc + block
+      }
     }
     draws <- acc / cf$n_folds
 
@@ -281,17 +300,48 @@ predict.bllnn_fit <- function(object, newdata = NULL,
         stop("`type = \"response\"` needs linear terms, and this fit has ",
              "none.", call. = FALSE)
       }
-      stop("Predicting the response on new data needs E[X|Z] for those rows ",
-           "to residualise them, which is not yet implemented. Use ",
-           "type = \"f\".", call. = FALSE)
+      if (is.null(ehat_acc)) {
+        stop("This fit was built without the confounding channel, so E[X|Z] ",
+             "is not available for new rows and the linear terms cannot be ",
+             "residualised. Refit supplying `linear`.", call. = FALSE)
+      }
+
+      # The model is fitted on X - E[X|Z], so a prediction has to be built on
+      # the same scale. Using the raw column here would silently mix two
+      # parameterisations and shift every prediction by beta * E[X|Z].
+      lin_terms <- stats::delete.response(stats::terms(object$linear))
+      missing_vars <- setdiff(all.vars(lin_terms), names(newdata))
+      if (length(missing_vars)) {
+        stop("`newdata` is missing the linear term(s): ",
+             paste(missing_vars, collapse = ", "),
+             '. They are required for type = "response"; use type = "f" if ',
+             "only the nonlinear part is wanted.", call. = FALSE)
+      }
+      Xnew <- stats::model.matrix(
+        lin_terms,
+        stats::model.frame(lin_terms, data = newdata,
+                           na.action = stats::na.pass))
+      Xnew <- Xnew[, colnames(Xnew) != "(Intercept)", drop = FALSE]
+
+      ehat_new <- ehat_acc / cf$n_folds
+      if (ncol(Xnew) != ncol(ehat_new)) {
+        stop(sprintf("`newdata` gives %d linear column(s) but the fit has %d.",
+                     ncol(Xnew), ncol(ehat_new)), call. = FALSE)
+      }
+      draws <- draws + object$beta %*% t(Xnew - ehat_new)
     }
   }
 
-  if (!interval) return(colMeans(draws))
+  # Unnamed throughout. The response path picks up row names from the linear
+  # design while the other paths do not, and one function returning a named or
+  # unnamed vector depending on an argument is worse than either choice.
+  if (!interval) return(unname(colMeans(draws)))
   a <- (1 - level) / 2
-  cbind(fit = colMeans(draws),
-        lower = apply(draws, 2, stats::quantile, probs = a),
-        upper = apply(draws, 2, stats::quantile, probs = 1 - a))
+  out <- cbind(fit = colMeans(draws),
+               lower = apply(draws, 2, stats::quantile, probs = a),
+               upper = apply(draws, 2, stats::quantile, probs = 1 - a))
+  rownames(out) <- NULL
+  out
 }
 
 #' Diagnostic plots for a fitted model

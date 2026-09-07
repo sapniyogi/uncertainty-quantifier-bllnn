@@ -222,8 +222,6 @@ test_that("predict refuses what it cannot honestly do", {
   sim <- fit_case(n = 120)
   fit <- quick_fit(sim)
 
-  expect_error(predict(fit, newdata = sim$data[1:5, ], type = "response"),
-               "not yet implemented")
   expect_error(predict(fit, newdata = "nope"), "data frame")
   expect_error(predict(fit, interval = NA), "TRUE or FALSE")
 
@@ -259,4 +257,106 @@ test_that("print shows the call and the fitted interval", {
   expect_true(any(grepl("Call:", out)))
   expect_true(any(grepl("treat", out)))
   expect_true(any(grepl("cross-fitting", out)))
+})
+
+# --- predicting the response on new data ------------------------------------
+
+test_that("response prediction on new data residualises the linear terms", {
+  sim <- fit_case(n = 200)
+  fit <- quick_fit(sim)
+  nd <- sim$data[1:12, ]
+
+  f_new <- predict(fit, newdata = nd, type = "f")
+  resp <- predict(fit, newdata = nd, type = "response")
+  expect_length(resp, 12L)
+  expect_true(all(is.finite(resp)))
+  expect_false(isTRUE(all.equal(f_new, resp)))
+
+  # Reproduce the documented rule by hand. The model is fitted against
+  # X - E[X|Z], so the prediction must use the same quantity; the ehat columns
+  # come from the same fold-averaged pass that produces f.
+  cf <- fit$crossfit
+  m_k <- cf$m_per_fold
+  acc <- 0
+  eh <- 0
+  for (k in seq_len(cf$n_folds)) {
+    Phi_k <- feature_matrix(cf$bodies[[k]], as.matrix(nd[, paste0("z", 1:5)]))
+    cols <- seq_len(m_k) + (k - 1) * m_k
+    acc <- acc + fit$f_weight_draws[, cols, drop = FALSE] %*% t(Phi_k)
+    eh <- eh + Phi_k[, grepl("^ehat_", colnames(Phi_k)), drop = FALSE]
+  }
+  x_tilde <- matrix(nd$treat, ncol = 1) - eh / cf$n_folds
+  by_hand <- colMeans(acc / cf$n_folds + fit$beta %*% t(x_tilde))
+
+  expect_equal(resp, by_hand)
+})
+
+test_that("using the raw column instead of the residual would shift predictions", {
+  # Guards the residualisation above against being silently dropped: the two
+  # parameterisations differ by beta * E[X|Z], which is not small.
+  sim <- fit_case(n = 200)
+  fit <- quick_fit(sim)
+  nd <- sim$data[1:20, ]
+
+  cf <- fit$crossfit
+  m_k <- cf$m_per_fold
+  eh <- 0
+  for (k in seq_len(cf$n_folds)) {
+    Phi_k <- feature_matrix(cf$bodies[[k]], as.matrix(nd[, paste0("z", 1:5)]))
+    eh <- eh + Phi_k[, grepl("^ehat_", colnames(Phi_k)), drop = FALSE]
+  }
+  shift <- as.vector(coef(fit) * (eh / cf$n_folds))
+
+  raw_version <- predict(fit, newdata = nd, type = "response") + shift
+  expect_gt(max(abs(raw_version - predict(fit, newdata = nd,
+                                          type = "response"))), 0.05)
+})
+
+test_that("response prediction on new data agrees with the in-sample fit", {
+  # Not identical: in sample each row uses its own out-of-fold body, while new
+  # data averages all folds. But they describe the same surface, so they must
+  # track each other closely.
+  sim <- fit_case(n = 200)
+  fit <- quick_fit(sim)
+
+  in_sample <- predict(fit, type = "response")
+  as_new <- predict(fit, newdata = sim$data, type = "response")
+
+  expect_length(as_new, fit$n)
+  expect_gt(cor(in_sample, as_new), 0.95)
+})
+
+test_that("intervals are available on new data", {
+  sim <- fit_case(n = 150)
+  fit <- quick_fit(sim)
+  nd <- sim$data[1:8, ]
+
+  b <- predict(fit, newdata = nd, type = "response", interval = TRUE)
+  expect_equal(colnames(b), c("fit", "lower", "upper"))
+  expect_true(all(b[, "lower"] <= b[, "fit"]))
+  expect_true(all(b[, "fit"] <= b[, "upper"]))
+
+  wide <- predict(fit, newdata = nd, type = "response", interval = TRUE,
+                  level = 0.99)
+  expect_true(all(wide[, "upper"] - wide[, "lower"] >=
+                    b[, "upper"] - b[, "lower"]))
+})
+
+test_that("response prediction refuses what it cannot honestly do", {
+  sim <- fit_case(n = 150)
+  fit <- quick_fit(sim)
+
+  # The linear terms have to be present, because they are part of the answer.
+  nd <- sim$data[1:5, setdiff(names(sim$data), "treat")]
+  expect_error(predict(fit, newdata = nd, type = "response"),
+               "missing the linear term")
+  # But the nonlinear part alone is still available from the same frame.
+  expect_length(predict(fit, newdata = nd, type = "f"), 5L)
+
+  # A fit with no linear part has no response to predict.
+  no_linear <- bllnn(y ~ z1 + z2 + z3 + z4 + z5, data = sim$data,
+                     folds = 2, width = 5, epochs = 80, n_iter = 150,
+                     burn = 50, seed = 1)
+  expect_error(predict(no_linear, newdata = sim$data[1:5, ],
+                       type = "response"), "needs linear terms")
 })

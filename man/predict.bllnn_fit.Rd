@@ -42,6 +42,15 @@ exists so that the conditional draw is exact for rows whose response is
 being sampled; a new row has no response in the model, so there is nothing
 to leak and every body is a legitimate estimate of \code{f}. Averaging them is an
 ensemble, not a workaround.
+
+\code{type = "response"} on new data needs the linear terms as well, and needs
+them on the scale the model was fitted on. The model is fitted against
+\code{X - E[X | Z]}, so the prediction subtracts the same quantity, averaged over
+folds exactly as \code{f} is. Using the raw column instead would shift every
+prediction by \code{beta * E[X | Z]}. The auxiliary bodies supply \code{E[X | Z]} for
+rows they never saw, so nothing additional is estimated -- and it follows
+that a fit built without \code{linear} cannot do this, and says so rather than
+guessing.
 }
 \examples{
 sim <- sim_partial_linear(n = 120, beta = c(treat = 1.5), p_z = 5, seed = 1)
