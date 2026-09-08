@@ -1,0 +1,148 @@
+---
+title: "Getting started: honest intervals under nonlinear confounding"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started: honest intervals under nonlinear confounding}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 7,
+                      fig.height = 4.2, fig.align = "center")
+library(bllnn)
+```
+
+## The problem
+
+You have a treatment or exposure whose effect you want to estimate, and a pile
+of covariates that influence both it and the outcome. The relationship between
+those covariates and the outcome is not linear, and you have no particular
+theory about its shape.
+
+$$y = x\beta + f(z) + \varepsilon$$
+
+The target is $\beta$, with an interval you can defend. Everything about
+$f(z)$ is a nuisance -- but a nuisance that will contaminate $\beta$ if you
+model it badly, and contaminate it in a way that no amount of extra data
+repairs.
+
+Fitting a linear model and hoping is the usual failure. Let us watch it fail.
+
+```{r simulate}
+sim <- sim_partial_linear(n = 300, beta = c(treat = 1.5), p_z = 5,
+                          confounding = 0.6, seed = 11)
+str(sim$data, give.attr = FALSE)
+```
+
+The truth is $\beta = 1.5$. The covariates `z1`--`z5` drive the outcome through
+a smooth nonlinear function, and they are also correlated with `treat` -- that
+is what `confounding = 0.6` sets up.
+
+```{r ols}
+ols <- lm(y ~ treat + z1 + z2 + z3 + z4 + z5, data = sim$data)
+round(coef(ols)[["treat"]], 4)
+```
+
+```{r ols-hidden, echo = FALSE}
+b_ols <- coef(ols)[["treat"]]
+ci_ols <- confint(ols)["treat", ]
+```
+
+Least squares returns `r round(b_ols, 3)` against a truth of 1.5, with a 95%
+confidence interval of [`r round(ci_ols[1], 3)`, `r round(ci_ols[2], 3)`].
+The interval is narrow, confident, and wrong: the curvature in $f(z)$ that the
+linear terms cannot absorb ends up in the treatment coefficient, because
+`treat` is the covariate best positioned to absorb it.
+
+Note what does *not* fix this. The bias is not sampling noise, so a larger
+sample does not shrink it; it converges to the wrong number.
+
+## The fit
+
+```{r fit}
+fit <- bllnn(y ~ z1 + z2 + z3 + z4 + z5, data = sim$data,
+             linear = ~ treat, folds = 3, n_iter = 800, burn = 200,
+             seed = 11)
+summary(fit)
+```
+
+```{r fit-hidden, echo = FALSE}
+b_hat <- coef(fit)[["treat"]]
+ci <- confint(fit)["treat", ]
+```
+
+The estimate is `r round(b_hat, 3)` with a 95% credible interval of
+[`r round(ci[1], 3)`, `r round(ci[2], 3)`], which contains the truth. Note the
+interval is *wider* than the least-squares one. That is the point rather than a
+cost: the narrow interval was narrow because the model was certain about
+something false.
+
+The formula splits the two roles explicitly. The left side of `linear = ~ treat`
+names the terms you want coefficients for; everything in the main formula is
+handed to the network as nuisance. Nothing is inferred about which is which.
+
+## What makes the interval honest
+
+Two things, and they are not interchangeable with anything else.
+
+**The features are frozen.** The network body is learned by cross-fitting --
+trained on held-out folds, then fixed before any sampling happens. This is
+sample splitting, not a performance shortcut. Once the features are fixed, the
+conditional posterior of the last layer is exactly Gaussian and is drawn in
+closed form, so the block is an exact Gibbs step rather than an approximation
+embedded in one.
+
+**The linear terms are residualised against the nuisance.** This is the part
+that is easy to get backwards, and getting it backwards is worse than skipping
+it.
+
+The network is deliberately given the confounding channel: `bllnn_crossfit()`
+trains an auxiliary body estimating $E[x \mid z]$ and appends it to the
+features. But that creates a second problem -- the features can now represent
+$E[x \mid z]$ exactly, while $y$ depends on it only through $x\beta$, so the
+network and the coefficient compete for the same direction and $\beta$ is
+attenuated. The fix is to hand the sampler $x - E[x \mid z]$ instead of $x$.
+This is Robinson partialling-out, the identifying step behind double machine
+learning, and `bllnn()` does it for you.
+
+The direction matters. Projecting the *features* onto the orthogonal
+complement of $x$ -- the superficially similar operation -- forces
+$X'\Phi = 0$, which removes the network from the coefficient draw entirely and
+reduces $\beta$ to ordinary least squares with the confounding still in it.
+Measured over 25 simulated datasets, that variant covered the truth 8% of the
+time against a nominal 95%.
+
+## Checking the chain
+
+This is MCMC, so the output is a chain and deserves to be looked at rather
+than trusted.
+
+```{r diagnostics, fig.alt = "Trace and posterior density for the treatment coefficient"}
+plot(fit)
+```
+
+The trace should look like noise around a level, with no drift and no long
+excursions. The effective sample size in the summary above is the number that
+matters for interval accuracy; a few hundred is enough for a credible interval,
+and if it is much smaller, raise `n_iter` before believing the interval.
+
+## What this is really for
+
+The wrapper above is a convenience. `bllnn` is a *component*: the reason it
+exists is that you can put the draw inside a sampler of your own, alongside
+whatever else your model needs. That is the subject of the companion vignette,
+`vignette("custom-sampler", package = "bllnn")`, which also covers binary and
+count outcomes.
+
+## One caution
+
+The credible interval for $\beta$ is the claim this package makes and defends.
+Pointwise credible bands for $f(z)$ itself are a different quantity and are
+**not** honest in the same way: they describe uncertainty about the best fit
+within the span of the frozen features, and say nothing about how far that
+span sits from the truth. On a smooth test problem, nominal 95% bands for
+$f(z)$ covered it 58% of the time. This is a property of the frozen-feature
+design rather than of any particular posterior, and it does not affect
+$\beta$, which rests on residualisation rather than on $f$ being represented
+exactly.

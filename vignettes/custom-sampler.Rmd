@@ -1,0 +1,217 @@
+---
+title: "Using bllnn inside your own Gibbs sampler"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Using bllnn inside your own Gibbs sampler}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(bllnn)
+```
+
+The `bllnn()` wrapper fits one model: a partial-linear one, with a Gaussian
+outcome. This vignette is about the thing underneath it, which fits nothing at
+all and is more useful for that reason.
+
+## The contract
+
+A `bllnn_sampler` is one conditional draw, packaged so you can call it from a
+loop you wrote. It mirrors `dbarts`:
+
+| you call | it means |
+|---|---|
+| `set_response(mod, r)` | here is the residual you are responsible for |
+| `set_sigma(mod, s)` | here is the current noise **standard deviation** |
+| `gibbs_step(mod)` | give me one draw of `f`, as a vector of length `n` |
+
+The object has reference semantics. `set_response()` and `set_sigma()` modify
+it in place, so nothing is reassigned each sweep.
+
+Two things it will never do. It will not estimate the noise scale -- that
+belongs to you, and estimating it here would use the data twice and break the
+joint chain. And it will not silently run an invalid kernel: `gibbs_step()`
+errors unless `is_valid_kernel(mod)` is `TRUE`.
+
+## A complete host sampler
+
+The partial-linear model $y = x\beta + f(z) + \varepsilon$, written out by
+hand. This is what `bllnn()` does internally, and there is nothing hidden in
+it.
+
+```{r setup-data}
+sim <- sim_partial_linear(n = 400, beta = c(treat = 1.5), p_z = 5,
+                          confounding = 0.6, seed = 3)
+y <- sim$data$y
+x <- as.matrix(sim$data[, "treat", drop = FALSE])
+z <- as.matrix(sim$data[, paste0("z", 1:5)])
+```
+
+Learn the features once, by cross-fitting, and freeze them. Supplying
+`linear = x` also trains an auxiliary body for $E[x \mid z]$, which
+`partial_out()` then uses to residualise.
+
+```{r build}
+cf  <- bllnn_crossfit(z, y, linear = x, folds = 3, seed = 3)
+mod <- bllnn_sampler(cf, tau2 = "auto")
+xr  <- partial_out(cf)            # x - E[x | z]
+
+is_valid_kernel(mod)
+```
+
+Now the loop. Three conditionals, of which `bllnn` supplies one.
+
+```{r gibbs}
+set.seed(3)
+n_iter <- 600; burn <- 200
+p <- ncol(xr)
+XtX <- crossprod(xr)
+prior <- diag(p) / 100
+beta <- rep(0, p)
+sigma <- sd(y)
+keep <- matrix(NA_real_, n_iter, p)
+
+for (s in seq_len(n_iter)) {
+  ## f | beta, sigma  -- the block's job
+  set_response(mod, y - as.vector(xr %*% beta))
+  set_sigma(mod, sigma)
+  f <- gibbs_step(mod)
+
+  ## beta | f, sigma  -- yours
+  r <- y - f
+  V <- solve(XtX / sigma^2 + prior)
+  m <- V %*% (crossprod(xr, r) / sigma^2)
+  beta <- as.vector(m + t(chol(V)) %*% rnorm(p))
+
+  ## sigma^2 | beta, f  -- also yours
+  resid <- r - as.vector(xr %*% beta)
+  sigma <- sqrt(1 / rgamma(1, 2 + length(y) / 2, 1 + sum(resid^2) / 2))
+
+  keep[s, ] <- beta
+}
+
+post <- keep[-seq_len(burn), , drop = FALSE]
+round(c(mean = mean(post), quantile(post, c(0.025, 0.975))), 3)
+```
+
+```{r gibbs-hidden, echo = FALSE}
+pm <- mean(post); pq <- quantile(post, c(0.025, 0.975))
+```
+
+The posterior mean is `r round(pm, 3)` with a 95% interval of
+[`r round(pq[1], 3)`, `r round(pq[2], 3)`], against a truth of 1.5.
+
+Note the residual handed over each sweep is `y - x_resid %*% beta`, using the
+*residualised* design. That is not cosmetic: `Phi` contains $E[x \mid z]$ by
+construction, so if the raw `x` were used the network and $\beta$ would
+compete for the same direction and $\beta$ would be attenuated toward
+$\beta(1 - \rho^2)$.
+
+## Binary outcomes
+
+For a logistic outcome there is no residual scale -- you cannot subtract your
+contribution from a 0/1 response. So the host passes its contribution as an
+*offset* instead, and the block conditions on it. Set
+`posterior = "polyagamma"`, which is exact rather than approximate:
+conditional on Polya-Gamma latent variables the logistic likelihood is
+Gaussian in the weights.
+
+```{r binary-data}
+set.seed(7)
+n <- 600
+zb <- matrix(runif(n * 3, -1, 1), n, 3)
+fb <- 1.5 * sin(pi * zb[, 1]) - zb[, 2]^2
+xb <- rbinom(n, 1, 0.5)
+yb <- rbinom(n, 1, plogis(0.8 * xb + fb))
+```
+
+```{r binary-fit}
+body <- bllnn_warmup(zb, yb - 0.5, width = 16, epochs = 150, seed = 7)
+modb <- bllnn_sampler(body, tau2 = "auto", posterior = "polyagamma",
+                      data = zb)
+set_response(modb, yb)          # the outcome itself, not a residual
+```
+
+The host's own step needs the latent variables, which `gibbs_step()` leaves on
+the object as `modb$omega`. Given `omega` the outcome is conditionally
+Gaussian with observation precisions `omega`, so the coefficient draw is an
+ordinary weighted normal update.
+
+```{r binary-gibbs}
+nb <- 300; b <- 0; keepb <- numeric(nb)
+
+for (s in seq_len(nb)) {
+  set_offset(modb, b * xb)      # the host's contribution to the linear predictor
+  eta <- gibbs_step(modb)
+  om <- modb$omega
+
+  V <- 1 / (sum(om * xb^2) + 1 / 25)
+  m <- V * sum(xb * ((yb - 0.5) - om * eta))
+  b <- rnorm(1, m, sqrt(V))
+  keepb[s] <- b
+}
+
+kb <- keepb[-seq_len(100)]
+round(c(mean = mean(kb), quantile(kb, c(0.025, 0.975))), 3)
+```
+
+```{r binary-hidden, echo = FALSE}
+bm <- mean(kb); bq <- quantile(kb, c(0.025, 0.975))
+```
+
+`r round(bm, 3)` with a 95% interval of [`r round(bq[1], 3)`,
+`r round(bq[2], 3)`], against a truth of 0.8.
+
+## Counts
+
+Negative-binomial counts use the same augmentation with a different exponent.
+Set `dispersion = r`, a positive integer, and pass non-negative counts to
+`set_response()`. The dispersion is **not** estimated: the augmentation needs
+`PG(y + r, psi)`, which is exact only for whole `r`, so profile over a few
+values rather than expecting the sampler to learn it.
+
+Poisson counts are a different matter. The Polya-Gamma identity needs the
+$(1 + e^\psi)^{-b}$ form, which the Poisson likelihood does not have, so the
+exact augmentation cannot reach it. For that case there is
+`laplace_moments()`, which is approximate and **not** a valid kernel --
+`gibbs_step()` refuses `posterior = "laplace"` unless you pass
+`force = TRUE`. Use it one-shot, not in a loop.
+
+```{r laplace}
+set.seed(5)
+Phi <- matrix(rnorm(300 * 4), 300, 4)
+yp <- rpois(300, exp(as.vector(Phi %*% c(0.4, -0.3, 0.2, 0))))
+
+post_l <- laplace_moments(Phi, yp, tau2 = 10, family = "poisson")
+round(post_l$mean, 3)
+```
+
+How good that approximation is has been measured rather than assumed, against
+a long Polya-Gamma run as ground truth. Both its errors shrink with `n`: the
+gap between the mode and the posterior mean falls from 0.45 posterior standard
+deviations at `n` = 60 to 0.14 at `n` = 1000, and interval width from 0.95 of
+the exact width to 1.00 by `n` = 500. Where it is wrong it is overconfident.
+See `inst/validation/laplace_checks.R`.
+
+## The guard
+
+Not every combination is a legitimate transition kernel, and the ones that are
+not will produce plausible output while targeting the wrong distribution. That
+is the worst failure mode available here, so it is refused by default.
+
+```{r guard, error = TRUE}
+bad <- bllnn_sampler(Phi, tau2 = 1, posterior = "bootstrap")
+is_valid_kernel(bad)
+
+set_response(bad, rnorm(300))
+set_sigma(bad, 1)
+gibbs_step(bad)
+```
+
+`valid_kernels()` lists every combination and why each is or is not valid.
+
+```{r table}
+valid_kernels()[, c("posterior", "features", "valid")]
+```

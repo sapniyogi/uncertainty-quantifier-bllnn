@@ -433,6 +433,17 @@ set_sigma <- function(mod, s) {
 #'
 #' The weight draw is stored on the object and is available as `mod$w`.
 #'
+#' Under `posterior = "polyagamma"` the latent variables drawn this sweep are
+#' left on the object as `mod$omega`, and the host needs them. Conditional on
+#' `omega` the logistic likelihood is Gaussian with observation precisions
+#' `omega`, so a host drawing its own coefficients `b` from `x` uses
+#' `V = (x' diag(omega) x + prior)^-1` and
+#' `m = V x' (y - 1/2 - omega * eta)`, where `eta` is the value this function
+#' returned. Without `omega` the host cannot form its own conditional at all,
+#' which would make the augmented path uncomposable -- so it is part of the
+#' contract rather than an internal detail. See
+#' `vignette("custom-sampler", package = "bllnn")` for the full loop.
+#'
 #' @param mod A `bllnn_sampler` object with a response and sigma already set.
 #' @param force Run even when [is_valid_kernel()] is `FALSE`. The resulting
 #'   chain does not target the intended posterior. Only for deliberate

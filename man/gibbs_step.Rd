@@ -28,6 +28,17 @@ change between iterations. The cross-product and prior precision were
 computed at construction and are reused.
 
 The weight draw is stored on the object and is available as \code{mod$w}.
+
+Under \code{posterior = "polyagamma"} the latent variables drawn this sweep are
+left on the object as \code{mod$omega}, and the host needs them. Conditional on
+\code{omega} the logistic likelihood is Gaussian with observation precisions
+\code{omega}, so a host drawing its own coefficients \code{b} from \code{x} uses
+\verb{V = (x' diag(omega) x + prior)^-1} and
+\verb{m = V x' (y - 1/2 - omega * eta)}, where \code{eta} is the value this function
+returned. Without \code{omega} the host cannot form its own conditional at all,
+which would make the augmented path uncomposable -- so it is part of the
+contract rather than an internal detail. See
+\code{vignette("custom-sampler", package = "bllnn")} for the full loop.
 }
 \examples{
 set.seed(1)
