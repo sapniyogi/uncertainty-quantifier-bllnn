@@ -166,7 +166,11 @@ print.summary.bllnn_fit <- function(x, ...) {
       check.names = FALSE, row.names = rownames(tab)
     )
     print(out)
-    cat("\n* interval excludes zero\n")
+    # Only explain the mark when something is marked. Printing the legend
+    # unconditionally puts the words "excludes zero" under a table where
+    # nothing excludes zero, which is misleading in exactly the case where
+    # the reader most needs to see a null result clearly.
+    if (any(tab$excludes_zero)) cat("\n* interval excludes zero\n")
   }
 
   cat(sprintf("\nresidual sd    : %.4f\n", x$sigma))

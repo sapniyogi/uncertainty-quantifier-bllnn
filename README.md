@@ -150,14 +150,21 @@ Stated plainly, because they are real.
   which is a different quantity protected by a different argument.
 - **Not a predictive-accuracy story.** BLL variants generally do not beat
   Gaussian processes on standard regression benchmarks.
+- **`prior_beta` is not scale-free.** The default of 100 is a prior standard
+  deviation of 10 on each linear coefficient, which is diffuse for a
+  standardised outcome and badly informative for one measured in dollars. On
+  the LaLonde earnings data the default returns an estimate of \$1 with an
+  interval of [-\$19, \$22]; setting `prior_beta = var(y)` returns \$1233
+  with [-\$303, \$2699]. Set it on the scale of your outcome. See
+  `vignette("lalonde", package = "bllnn")`.
 - **Negative-binomial dispersion is fixed, not estimated.** It must be a
   positive integer; profile over a few values.
 
 ## Roadmap
 
-Vignettes and a worked demonstration on a public dataset; then CRAN
-preparation; then a C++ port of the numeric core, with the plain-R
-implementation kept permanently as the reference the port is tested against.
+A scale-aware default for `prior_beta`; then CRAN preparation; then a C++ port
+of the numeric core, with the plain-R implementation kept permanently as the
+reference the port is tested against.
 
 ## References
 

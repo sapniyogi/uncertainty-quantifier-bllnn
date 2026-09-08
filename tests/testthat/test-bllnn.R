@@ -179,6 +179,28 @@ test_that("summary reports the interval, the ESS, and warns when mixing is poor"
   expect_true(any(grepl("has not mixed", capture.output(print(summary(bad))))))
 })
 
+test_that("the significance legend appears only when something is marked", {
+  # The legend is printed under the coefficient table, so printing it
+  # unconditionally puts the words "excludes zero" beneath a table where
+  # nothing excludes zero. That is misleading in exactly the case where the
+  # reader most needs a null result to read as null, which is why it is
+  # asserted in both directions rather than only the marked one.
+  fit <- quick_fit()
+
+  marked <- fit
+  marked$beta <- matrix(stats::rnorm(400, mean = 5, sd = 0.3), ncol = 1,
+                        dimnames = list(NULL, "treat"))
+  out_marked <- capture.output(print(summary(marked)))
+  expect_true(any(grepl("*", out_marked, fixed = TRUE)))
+  expect_true(any(grepl("interval excludes zero", out_marked)))
+
+  null_fit <- fit
+  null_fit$beta <- matrix(stats::rnorm(400, mean = 0, sd = 1), ncol = 1,
+                          dimnames = list(NULL, "treat"))
+  out_null <- capture.output(print(summary(null_fit)))
+  expect_false(any(grepl("interval excludes zero", out_null)))
+})
+
 test_that("predict returns fitted values and honest intervals", {
   fit <- quick_fit()
 
