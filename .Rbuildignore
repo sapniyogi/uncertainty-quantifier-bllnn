@@ -8,3 +8,4 @@
 ^bllnn_progress_report\.docx$
 ^~\$
 ^inst/validation/coverage_results\.rds$
+^cran-comments\.md$

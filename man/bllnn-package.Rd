@@ -5,7 +5,15 @@
 \alias{bllnn-package}
 \title{bllnn: Bayesian Last Layer Neural Networks as Composable Gibbs Blocks}
 \description{
-Exposes a Bayesian Last Layer neural network as a composable conditional-model block for user-written Gibbs samplers, in the spirit of 'dbarts' for Bayesian Additive Regression Trees. The caller supplies a residual and a noise level and receives one honest posterior draw of the nonlinear function. Intended for partial-linear causal inference where the linear coefficient requires an honest credible interval.
+Exposes a Bayesian Last Layer neural network as a composable conditional-model block for user-written Gibbs samplers, in the spirit of 'dbarts' for Bayesian Additive Regression Trees. The caller supplies a residual and a noise level and receives one honest posterior draw of the nonlinear function. Intended for partial-linear causal inference where the linear coefficient requires an honest credible interval. The augmentation for binary and count outcomes follows Polson, Scott and Windle (2013) \doi{10.1080/01621459.2013.829001}; the treatment of regularisation-induced confounding follows Hahn, Murray and Carvalho (2020) \doi{10.1214/19-BA1195}; and the partialling-out step is that of Chernozhukov and others (2018) \doi{10.1111/ectj.12097}.
+}
+\seealso{
+Useful links:
+\itemize{
+  \item \url{https://github.com/sapniyogi/uncertainty-quantifier-bllnn}
+  \item Report bugs at \url{https://github.com/sapniyogi/uncertainty-quantifier-bllnn/issues}
+}
+
 }
 \author{
 \strong{Maintainer}: Saptarshi Niyogi \email{suvo123123@gmail.com} [copyright holder]

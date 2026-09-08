@@ -34,7 +34,6 @@ export(set_response)
 export(set_sigma)
 export(sim_partial_linear)
 export(valid_kernels)
-export(vec_sum)
 importFrom(Rcpp,sourceCpp)
 importFrom(grDevices,rgb)
 importFrom(graphics,

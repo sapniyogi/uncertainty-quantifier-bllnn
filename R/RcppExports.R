@@ -3,19 +3,21 @@
 
 #' Sum of a numeric vector
 #'
-#' A toolchain smoke test, not a statistical routine. It exists to prove that
-#' the C++ compiler, the Rcpp/RcppArmadillo headers, and the R binding all
-#' work end to end on this machine. Delete it once a real numeric core lands.
+#' A toolchain smoke test, not a statistical routine, and deliberately not
+#' exported: it exists to prove that the C++ compiler, the Rcpp/RcppArmadillo
+#' headers, the Makevars link line and the R binding all work end to end, so
+#' that the numeric core can be ported without first discovering the build is
+#' broken. Duplicating `sum()` in the public API would be worse than useless.
+#'
+#' It stays until the port replaces it with something real, at which point it
+#' and its test should go.
 #'
 #' @param x A numeric vector.
 #'
 #' @return A length-one numeric vector: the sum of `x`. The sum of an empty
 #'   vector is `0`.
 #'
-#' @examples
-#' vec_sum(c(1, 2, 3))
-#'
-#' @export
+#' @noRd
 vec_sum <- function(x) {
     .Call(`_bllnn_vec_sum`, x)
 }
