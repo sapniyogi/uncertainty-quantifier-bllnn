@@ -1,7 +1,7 @@
 # The money plot.
 # Required by SESSION_PROTOCOL.md, "After the coverage simulation".
 #
-#   Rscript inst/validation/coverage_simulation.R          (roughly an hour)
+#   Rscript inst/validation/coverage_simulation.R          (about 15 minutes)
 #   Rscript inst/validation/coverage_simulation.R 10       (pilot, minutes)
 #
 # Across many simulated datasets, does a nominal 95% credible interval for the

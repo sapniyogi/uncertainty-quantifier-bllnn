@@ -113,6 +113,17 @@ and, on this evidence, the wrong one for causal work.
 computed here and stored on the object, so \code{\link[=feature_matrix]{feature_matrix()}} applies the
 identical transformation to new data. Recomputing them per-dataset would
 silently produce a different feature map for the sampling fold.
+
+The response is standardised too, and \code{\link[=predict.bllnn_body]{predict.bllnn_body()}} undoes it.
+Until 2026-09-07 it was only centred, which made the fit depend on the
+units of \code{y}: Adam moves the weights about \code{learn_rate} per step whatever
+the gradient is, so a fixed epoch budget buys a fixed distance, while the
+distance required grows with the response. Measured on this package's
+simulator, the relative error of the fitted body was 0.29; with the same
+data scaled by 1000 it was 0.93, which is barely better than predicting the
+mean. Standardising gives 0.28 at every scale. Weight decay was the obvious
+suspect and is not the cause -- the degradation is identical at
+\code{weight_decay = 0}.
 }
 \section{Confounding}{
 

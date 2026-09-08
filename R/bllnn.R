@@ -5,6 +5,42 @@
 # hand. Each of those four was, at some point in development, the thing that
 # was silently wrong.
 
+#' A weakly informative prior variance for the linear coefficients
+#'
+#' Scaled to the data, because a fixed number cannot be weakly informative for
+#' every outcome. A coefficient multiplies `x_j` to produce something on the
+#' scale of `y`, so the only scale-free statement about its size is in units of
+#' `sd(y) / sd(x_j)`; two and a half of those is the convention `rstanarm` uses
+#' for the same purpose, and it is wide enough that the likelihood dominates at
+#' any sample size worth fitting.
+#'
+#' What this replaces was the fixed value 100 -- a prior standard deviation of
+#' 10 on every coefficient regardless of units. On the package's simulations,
+#' where `sd(y)` is about 5, that is diffuse and harmless. On earnings in
+#' dollars it is not: with `sigma` near 7300 the data contribute a precision
+#' around 1e-6 against the prior's 0.01, the prior wins by three orders of
+#' magnitude, and the reported posterior is the prior. See
+#' `vignette("lalonde")`.
+#'
+#' `sd(x_j)` is taken on the residualised design, which is the column that
+#' actually enters the likelihood. That is deliberate: residualising shrinks a
+#' column's spread, which lowers its information, and the prior has to widen
+#' correspondingly or it would tighten exactly where the data got weaker.
+#'
+#' @noRd
+auto_prior_beta <- function(y, X) {
+  sy <- stats::sd(y)
+  if (!is.finite(sy) || sy <= 0) sy <- 1
+  vapply(seq_len(ncol(X)), function(j) {
+    sx <- stats::sd(X[, j])
+    # A column with no spread carries no information about its coefficient, so
+    # there is no data scale to calibrate against. Fall back to the outcome
+    # scale alone rather than dividing by zero.
+    if (!is.finite(sx) || sx <= 0) sx <- 1
+    (2.5 * sy / sx)^2
+  }, numeric(1))
+}
+
 #' Run the host Gibbs sampler around the block
 #'
 #' beta | f, sigma^2 conjugate normal; f | beta, sigma^2 from [gibbs_step()];
@@ -22,7 +58,8 @@ run_host_gibbs <- function(y, X, Phi, tau2, n_iter, burn, v_beta, a0, b0,
   }
 
   XtX <- crossprod(X)
-  prior_prec <- diag(p) / v_beta
+  # One variance per coefficient, since they need not share units.
+  prior_prec <- diag(1 / rep_len(v_beta, p), nrow = p)
   beta <- rep(0, p)
   f <- rep(0, n)
   sigma2 <- stats::var(y)
@@ -123,9 +160,18 @@ ess_of <- function(x, max_lag = 200) {
 #' @param burn Iterations discarded as burn-in.
 #' @param tau2 Prior variance of the last-layer weights; see
 #'   [bllnn_sampler()]. `"auto"` reads it from the residual scale.
-#' @param prior_beta Prior variance for the linear coefficients. The default is
-#'   deliberately diffuse: these are the parameters of interest and should be
-#'   driven by the data.
+#' @param prior_beta Prior variance for the linear coefficients. `"auto"` (the
+#'   default) scales it to the data as `(2.5 * sd(y) / sd(x_j))^2` per
+#'   coefficient, which is the `rstanarm` convention for a weakly informative
+#'   prior and is wide enough that the likelihood dominates.
+#'
+#'   A number is accepted and fixes the variance for every coefficient, but
+#'   **it is not scale-free**, and this is the argument most likely to be got
+#'   wrong. A value that is diffuse for a standardised outcome can outweigh the
+#'   likelihood by orders of magnitude for one measured in dollars, in which
+#'   case the reported posterior is simply the prior and nothing warns. The
+#'   previous default of 100 did exactly that on the LaLonde earnings data; see
+#'   `vignette("lalonde", package = "bllnn")`.
 #' @param sigma_shape,sigma_rate Inverse gamma prior for `sigma^2`.
 #' @param keep_f Store every draw of the fitted function. Needed for credible
 #'   bands from [plot.bllnn_fit()]; costs `(n_iter - burn) * n` doubles.
@@ -151,7 +197,7 @@ ess_of <- function(x, max_lag = 200) {
 #' @export
 bllnn <- function(formula, data, linear = NULL, folds = 5,
                   n_iter = 2000, burn = 500, tau2 = "auto",
-                  prior_beta = 100, sigma_shape = 2, sigma_rate = 1,
+                  prior_beta = "auto", sigma_shape = 2, sigma_rate = 1,
                   keep_f = TRUE, seed = NULL, ...) {
   cl <- match.call()
 
@@ -175,6 +221,16 @@ bllnn <- function(formula, data, linear = NULL, folds = 5,
   }
   if (!is.logical(keep_f) || length(keep_f) != 1 || is.na(keep_f)) {
     stop("`keep_f` must be TRUE or FALSE.", call. = FALSE)
+  }
+  prior_beta_auto <- is.character(prior_beta) && length(prior_beta) == 1 &&
+    prior_beta == "auto"
+  if (!prior_beta_auto &&
+      (!is.numeric(prior_beta) || anyNA(prior_beta) || any(prior_beta <= 0))) {
+    stop('`prior_beta` must be "auto" or positive number(s). It is a prior ',
+         "variance, not a standard deviation, and it is not scale-free: a ",
+         "fixed value that is diffuse for one outcome can dominate the ",
+         'likelihood for another. Use "auto" unless you have a reason not ',
+         "to.", call. = FALSE)
   }
 
   # One model frame for both parts, so a row dropped for a missing value is
@@ -268,8 +324,13 @@ bllnn <- function(formula, data, linear = NULL, folds = 5,
                   f_sd = sqrt(pmax(0, f_sumsq / n_keep - (f_sum / n_keep)^2)),
                   sampler = mod)
   } else {
+    v_beta <- if (prior_beta_auto) {
+      auto_prior_beta(y, X_used)
+    } else {
+      rep_len(prior_beta, ncol(X_used))
+    }
     draws <- run_host_gibbs(y, X_used, Phi, tau2 = tau2, n_iter = n_iter,
-                            burn = burn, v_beta = prior_beta,
+                            burn = burn, v_beta = v_beta,
                             a0 = sigma_shape, b0 = sigma_rate,
                             keep_f = keep_f)
   }

@@ -13,7 +13,7 @@ bllnn(
   n_iter = 2000,
   burn = 500,
   tau2 = "auto",
-  prior_beta = 100,
+  prior_beta = "auto",
   sigma_shape = 2,
   sigma_rate = 1,
   keep_f = TRUE,
@@ -43,9 +43,18 @@ no linear part.}
 \item{tau2}{Prior variance of the last-layer weights; see
 \code{\link[=bllnn_sampler]{bllnn_sampler()}}. \code{"auto"} reads it from the residual scale.}
 
-\item{prior_beta}{Prior variance for the linear coefficients. The default is
-deliberately diffuse: these are the parameters of interest and should be
-driven by the data.}
+\item{prior_beta}{Prior variance for the linear coefficients. \code{"auto"} (the
+default) scales it to the data as \code{(2.5 * sd(y) / sd(x_j))^2} per
+coefficient, which is the \code{rstanarm} convention for a weakly informative
+prior and is wide enough that the likelihood dominates.
+
+A number is accepted and fixes the variance for every coefficient, but
+\strong{it is not scale-free}, and this is the argument most likely to be got
+wrong. A value that is diffuse for a standardised outcome can outweigh the
+likelihood by orders of magnitude for one measured in dollars, in which
+case the reported posterior is simply the prior and nothing warns. The
+previous default of 100 did exactly that on the LaLonde earnings data; see
+\code{vignette("lalonde", package = "bllnn")}.}
 
 \item{sigma_shape, sigma_rate}{Inverse gamma prior for \code{sigma^2}.}
 

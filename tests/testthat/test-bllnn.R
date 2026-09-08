@@ -382,3 +382,59 @@ test_that("response prediction refuses what it cannot honestly do", {
   expect_error(predict(no_linear, newdata = sim$data[1:5, ],
                        type = "response"), "needs linear terms")
 })
+
+test_that("the coefficient prior scales with the data rather than being fixed", {
+  # The defect this guards shipped because every simulation here produces a
+  # response with standard deviation about 5, where the old fixed
+  # prior_beta = 100 is diffuse. On earnings in dollars it was not: the data
+  # contributed a precision near 1e-6 against the prior's 0.01, so the
+  # posterior was the prior, and the reported effect was one dollar with an
+  # interval of [-19, 22] on an outcome with a standard deviation over 7000.
+  #
+  # The assertion is invariance under a change of units, which is the property
+  # that actually failed. A bound on the estimate at one scale would have
+  # passed the whole time the bug existed.
+  skip_on_cran()
+
+  sim <- sim_partial_linear(n = 250, beta = c(treat = 1.5), p_z = 5,
+                            confounding = 0.6, seed = 8)
+  big <- sim$data
+  big$y <- big$y * 1000
+
+  base <- bllnn(y ~ z1 + z2 + z3 + z4 + z5, data = sim$data,
+                linear = ~ treat, folds = 2, n_iter = 500, burn = 150,
+                seed = 8)
+  scaled <- bllnn(y ~ z1 + z2 + z3 + z4 + z5, data = big, linear = ~ treat,
+                  folds = 2, n_iter = 500, burn = 150, seed = 8)
+
+  # Compared against the posterior standard deviation, which is the scale on
+  # which a difference would mean anything. Bit-identical chains are not the
+  # claim and are not achievable: multiplying by 1000 perturbs the arithmetic
+  # in the last places, and an MCMC chain amplifies that over its iterations.
+  # What must hold is that the inference does not move.
+  post_sd <- stats::sd(base$beta[, "treat"])
+
+  expect_lt(abs(coef(scaled)[["treat"]] / 1000 - coef(base)[["treat"]]),
+            0.05 * post_sd)
+  expect_lt(max(abs(confint(scaled)["treat", ] / 1000 -
+                      confint(base)["treat", ])),
+            0.05 * post_sd)
+
+  # The old behaviour would have failed this by a factor of hundreds, not by a
+  # fraction of a standard deviation.
+  expect_gt(abs(coef(base)[["treat"]]), 0.5)
+})
+
+test_that("prior_beta accepts a number and refuses nonsense", {
+  sim <- sim_partial_linear(n = 120, beta = c(treat = 1.5), p_z = 5, seed = 9)
+  args <- list(formula = y ~ z1 + z2 + z3 + z4 + z5, data = sim$data,
+               linear = ~ treat, folds = 2, n_iter = 200, burn = 60, seed = 9)
+
+  fixed <- do.call(bllnn, c(args, list(prior_beta = 50)))
+  expect_true(is.finite(coef(fixed)[["treat"]]))
+
+  expect_error(do.call(bllnn, c(args, list(prior_beta = -1))),
+               "prior variance")
+  expect_error(do.call(bllnn, c(args, list(prior_beta = "wide"))),
+               "prior variance")
+})

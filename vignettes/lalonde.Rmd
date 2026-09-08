@@ -23,8 +23,10 @@ makes them useful and also what makes them easy. This vignette runs `bllnn` on
 a real dataset where the truth is contested, the assumptions are visibly
 violated, and the answer is less comfortable.
 
-It is also, deliberately, the example that found a defect. That part is kept
-in.
+It is also the example that found two defects in this package, both of them
+invisible to every simulation here because simulated responses are conveniently
+scaled. Those are fixed, and the account of them is kept in rather than tidied
+away, because the reasoning transfers to whatever you fit next.
 
 ## The data
 
@@ -84,46 +86,47 @@ experimental benchmark of roughly \$1,794 from the randomised comparison --
 a number that comes from data not in this file, so treat it as a landmark
 rather than as ground truth for what follows.
 
-## The defect this example found
+## Why the prior is scaled to your data
 
-Running `bllnn()` with its defaults gives something absurd, and it is
-instructive rather than embarrassing.
-
-```{r default-prior}
-fit_default <- bllnn(re78 ~ age + educ + race + married + nodegree + re74 + re75,
-                     data = lalonde, linear = ~ treat, folds = 3,
-                     n_iter = 1500, burn = 500, seed = 1)
-round(c(coef(fit_default)[["treat"]], confint(fit_default)["treat", ]), 1)
-```
-
-An effect of a few dollars, with an interval a few tens of dollars wide, for an
-outcome whose standard deviation is over \$7,000. That is not an estimate; it
-is the prior.
-
-The cause is `prior_beta`, whose default is 100 -- a prior standard deviation
-of \$10 on the treatment coefficient. In the package's simulations the outcome
-has a standard deviation of about 5, so a prior of `N(0, 100)` is diffuse and
-harmless. On earnings in dollars it asserts, before seeing anything, that the
-effect is almost certainly between -\$20 and \$20. The data contribute a
-precision of roughly `sum(xr^2)/sigma^2`, about `1e-6` here, against the
-prior's `0.01`; the prior outweighs the likelihood by a factor of thousands
-and the posterior is simply the prior.
-
-**`prior_beta` is not scale-free, and you must set it to match your outcome.**
-A defensible default is the variance of the response, which says the effect is
-unlikely to exceed one outcome standard deviation by much.
-
-```{r scaled-prior}
+```{r fit}
 fit <- bllnn(re78 ~ age + educ + race + married + nodegree + re74 + re75,
              data = lalonde, linear = ~ treat, folds = 3,
-             n_iter = 1500, burn = 500,
-             prior_beta = var(lalonde$re78), seed = 1)
+             n_iter = 1500, burn = 500, seed = 1)
 summary(fit)
 ```
 
 ```{r hidden, echo = FALSE}
 bh <- coef(fit)[["treat"]]; cb <- confint(fit)["treat", ]
 ```
+
+That works on the defaults, and it is worth saying why it did not always, because
+the reason generalises past this dataset.
+
+`prior_beta` is the prior variance on the linear coefficients, and it cannot be
+a fixed number. A coefficient multiplies `treat` to produce dollars, so any
+statement about its plausible size is a statement in units of
+`sd(y) / sd(treat)`. Until 2026-09-07 the default was a flat 100 -- a prior
+standard deviation of \$10 -- which is diffuse when the response has a standard
+deviation of about 5, as everything in this package's simulations does, and
+absurd when the response is earnings. On this data the likelihood contributed a
+precision near `1e-6` against the prior's `0.01`, so the prior won by three
+orders of magnitude and the reported posterior was the prior: an effect of one
+dollar, with an interval of [-\$19, \$22], on an outcome whose standard
+deviation exceeds \$7,000. Nothing warned.
+
+The default is now `"auto"`, which sets `(2.5 * sd(y) / sd(x_j))^2` per
+coefficient -- the convention `rstanarm` uses, wide enough that the likelihood
+dominates. You can still pass a number, and if you do, it is on you to put it on
+the scale of your outcome.
+
+The same example exposed a second scale dependence, in the network rather than
+the prior. `bllnn_warmup()` centred the response but did not scale it, and Adam
+moves the weights by about `learn_rate` per step whatever the gradient is -- so a
+fixed epoch budget buys a fixed distance in weight space while the distance
+needed grows with the response. The body fitted here was never arriving. The
+response is now standardised, and both are checked by tests that assert
+invariance under a change of units rather than a threshold at one scale, because
+a threshold at one scale is exactly what failed to catch either of them.
 
 ## What to conclude
 
@@ -166,8 +169,9 @@ responds to the difficulty of the problem rather than hiding it.
   data.
 - Pointwise credible bands for `f(z)` are not honest in the way the
   coefficient interval is; see the limitations section of the README.
-- `prior_beta` must be set on the scale of your outcome. This vignette exists
-  partly to make that impossible to miss.
+- The prior and the network now both scale themselves to your response, but
+  nothing scales your *judgement* of what a plausible effect is. If you set
+  `prior_beta` by hand, set it in the units of your outcome.
 
 ## References
 

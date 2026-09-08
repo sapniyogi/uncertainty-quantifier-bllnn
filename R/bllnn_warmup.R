@@ -227,6 +227,17 @@ tuning_grid <- function() {
 #' identical transformation to new data. Recomputing them per-dataset would
 #' silently produce a different feature map for the sampling fold.
 #'
+#' The response is standardised too, and [predict.bllnn_body()] undoes it.
+#' Until 2026-09-07 it was only centred, which made the fit depend on the
+#' units of `y`: Adam moves the weights about `learn_rate` per step whatever
+#' the gradient is, so a fixed epoch budget buys a fixed distance, while the
+#' distance required grows with the response. Measured on this package's
+#' simulator, the relative error of the fitted body was 0.29; with the same
+#' data scaled by 1000 it was 0.93, which is barely better than predicting the
+#' mean. Standardising gives 0.28 at every scale. Weight decay was the obvious
+#' suspect and is not the cause -- the degradation is identical at
+#' `weight_decay = 0`.
+#'
 #' @section Confounding:
 #'
 #' When `linear` is supplied, an auxiliary body is trained for each of its
@@ -371,8 +382,21 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
   X <- scale(x, center = centre, scale = scale_)
   attributes(X) <- list(dim = dim(X))
 
+  # The response is scaled as well as centred, and the scaling is not cosmetic.
+  # Adam's update has magnitude about learn_rate per step whatever the gradient
+  # is, so in a fixed number of epochs the weights travel a fixed distance --
+  # while the distance they need to travel grows with the response. Centring
+  # alone therefore made the fit scale-dependent: on this package's simulator
+  # the relative error of the fitted body was 0.29, and on the same data with
+  # the response multiplied by 1000 it was 0.93, which is barely better than
+  # predicting the mean. Standardising makes it 0.28 at every scale.
+  #
+  # It is not weight decay, which was the obvious suspect and was measured:
+  # setting weight_decay = 0 leaves the degradation exactly unchanged.
   y_centre <- mean(y)
-  y_c <- y - y_centre
+  y_scale <- stats::sd(y)
+  if (!is.finite(y_scale) || y_scale <= 0) y_scale <- 1
+  y_c <- (y - y_centre) / y_scale
 
   n_val <- max(1L, round(validation * n))
   if (n_val >= n) n_val <- n - 1L
@@ -432,6 +456,7 @@ bllnn_warmup <- function(x, y, linear = NULL, width = 50, epochs = 2000,
     centre = centre,
     scale = scale_,
     y_centre = y_centre,
+    y_scale = y_scale,
     learn_rate = learn_rate,
     weight_decay = weight_decay,
     tuned = isTRUE(tune),
@@ -526,7 +551,10 @@ predict.bllnn_body <- function(object, newdata, ...) {
   # weights for the hidden units alone.
   Phi <- feature_matrix(object, newdata)
   H <- Phi[, seq_len(object$width) + 1L, drop = FALSE]
-  as.vector(H %*% object$params$w_out + object$params$b_out) +
+  # Undo the standardisation applied during training. A body from before
+  # y_scale existed has no such field; treating that as 1 keeps it readable.
+  y_scale <- if (is.null(object$y_scale)) 1 else object$y_scale
+  as.vector(H %*% object$params$w_out + object$params$b_out) * y_scale +
     object$y_centre
 }
 

@@ -8,7 +8,7 @@ does for Bayesian Additive Regression Trees.
 Hand it a residual and a noise level; get back one honest posterior draw of a
 nonlinear function. That contract is the whole package.
 
-> **Status:** working and tested, not yet on CRAN. 1229 tests, `R CMD check`
+> **Status:** working and tested, not yet on CRAN. 1242 tests, `R CMD check`
 > clean. The API is stable enough to build on, but not yet frozen.
 
 ## What this is, and what it is not
@@ -59,7 +59,7 @@ summary(fit)
 Linear coefficients (95% credible intervals):
 
       Estimate     SD  Lower  Upper ESS
-treat   1.4757 0.0955 1.2947 1.6591 638 *
+treat   1.4736 0.0938 1.2939 1.6620 826 *
 
 * interval excludes zero
 ```
@@ -131,9 +131,10 @@ it the network can represent `E[x | z]` exactly and competes with `b` for the
 same direction, attenuating it.
 
 Over 100 simulated datasets at confounding 0.6, nominal 95% intervals covered
-the true coefficient **96%** of the time, with bias **-0.020** where naive
+the true coefficient **96%** of the time, with bias **-0.024** where naive
 least squares carried **+0.397**. The script is
-`inst/validation/coverage_simulation.R`.
+`inst/validation/coverage_simulation.R`, and it exercises the same
+configuration the defaults give you.
 
 ## Known limitations
 
@@ -150,21 +151,19 @@ Stated plainly, because they are real.
   which is a different quantity protected by a different argument.
 - **Not a predictive-accuracy story.** BLL variants generally do not beat
   Gaussian processes on standard regression benchmarks.
-- **`prior_beta` is not scale-free.** The default of 100 is a prior standard
-  deviation of 10 on each linear coefficient, which is diffuse for a
-  standardised outcome and badly informative for one measured in dollars. On
-  the LaLonde earnings data the default returns an estimate of \$1 with an
-  interval of [-\$19, \$22]; setting `prior_beta = var(y)` returns \$1233
-  with [-\$303, \$2699]. Set it on the scale of your outcome. See
-  `vignette("lalonde", package = "bllnn")`.
+- **A hand-set `prior_beta` must be on the scale of your outcome.** The
+  default is `"auto"` and scales itself, but a number you pass does not. This
+  is not hypothetical: the fixed default of 100 that `"auto"` replaced
+  returned an effect of \$1 with an interval of [-\$19, \$22] on the LaLonde
+  earnings data, because the prior outweighed the likelihood by three orders
+  of magnitude. See `vignette("lalonde", package = "bllnn")`.
 - **Negative-binomial dispersion is fixed, not estimated.** It must be a
   positive integer; profile over a few values.
 
 ## Roadmap
 
-A scale-aware default for `prior_beta`; then CRAN preparation; then a C++ port
-of the numeric core, with the plain-R implementation kept permanently as the
-reference the port is tested against.
+CRAN preparation; then a C++ port of the numeric core, with the plain-R
+implementation kept permanently as the reference the port is tested against.
 
 ## References
 

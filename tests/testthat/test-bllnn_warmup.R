@@ -636,3 +636,58 @@ test_that("tune is validated", {
   expect_error(bllnn_warmup(case$Z, case$r, tune = "yes"), "TRUE or FALSE")
   expect_error(bllnn_warmup(case$Z, case$r, tune = NA), "TRUE or FALSE")
 })
+
+test_that("the fitted body does not depend on the units of the response", {
+  # Regression test for a defect that shipped unnoticed because every
+  # simulation in this package produces a response with standard deviation
+  # around 5, where it does not bite.
+  #
+  # The response used to be centred but not scaled. Adam moves the weights by
+  # about learn_rate per step regardless of the gradient, so a fixed epoch
+  # budget buys a fixed distance in weight space, while the distance needed to
+  # reach an output 1000 times larger is 1000 times further. The body simply
+  # never arrived: relative error went from 0.29 to 0.93, the latter being
+  # barely better than predicting the mean.
+  #
+  # Asserted as invariance rather than as a threshold, because the claim is
+  # that the answer does not depend on the units -- a bound on the error at
+  # one scale would have passed throughout the period the bug existed.
+  skip_on_cran()
+
+  sim <- sim_partial_linear(n = 300, beta = c(treat = 1.5), p_z = 5, seed = 2)
+  z <- as.matrix(sim$data[, paste0("z", 1:5)])
+
+  rel_err <- function(k) {
+    body <- bllnn_warmup(z, sim$data$y * k, width = 24, epochs = 150,
+                         seed = 2)
+    sqrt(mean((stats::predict(body, z) - sim$f_true * k)^2)) /
+      stats::sd(sim$f_true * k)
+  }
+
+  errs <- vapply(c(1, 1000), rel_err, numeric(1))
+
+  # Same problem in different units must give the same quality of fit.
+  expect_equal(errs[1], errs[2], tolerance = 0.05)
+
+  # And that shared value must be a real fit, not two matching failures: a
+  # body that predicted the mean would score 1 at both scales and satisfy the
+  # invariance above on its own.
+  expect_lt(max(errs), 0.6)
+})
+
+test_that("predict inverts the response standardisation", {
+  # The body trains on a standardised target, so predict() has to put the
+  # answer back on the response's own scale. If it did not, every ehat_ column
+  # would be wrong and partial_out() would silently residualise against the
+  # wrong quantity.
+  sim <- sim_partial_linear(n = 200, beta = c(treat = 1.5), p_z = 5, seed = 3)
+  z <- as.matrix(sim$data[, paste0("z", 1:5)])
+  y <- sim$data$y * 500
+
+  body <- bllnn_warmup(z, y, width = 16, epochs = 80, seed = 3)
+  pred <- stats::predict(body, z)
+
+  # On the scale of y, not of y standardised.
+  expect_gt(stats::sd(pred), 0.3 * stats::sd(y))
+  expect_lt(abs(mean(pred) - mean(y)), stats::sd(y))
+})

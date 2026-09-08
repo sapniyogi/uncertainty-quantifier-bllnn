@@ -13,12 +13,20 @@
 # from the caller's side.
 
 host_gibbs <- function(y, X, Phi, tau2 = "auto", n_iter = 1500, burn = 500,
-                       v_beta = 100, a0 = 2, b0 = 1, seed = 1) {
+                       v_beta = "auto", a0 = 2, b0 = 1, seed = 1) {
   stopifnot(is.matrix(X), length(y) == nrow(X), nrow(Phi) == length(y))
   set.seed(seed)
 
   n <- length(y)
   p <- ncol(X)
+
+  # Same rule bllnn() uses, so the coverage number this script produces is
+  # about the configuration users actually get. It was v_beta = 100 until
+  # 2026-09-07, which is diffuse at this simulator's scale -- the estimates are
+  # unchanged here -- but was not diffuse on real data, and a validation script
+  # that quietly differs from the shipped default is worth less than it looks.
+  if (identical(v_beta, "auto")) v_beta <- auto_prior_beta(y, X)
+  v_beta <- rep_len(v_beta, p)
   mod <- bllnn_sampler(Phi, tau2 = tau2)
   if (!is_valid_kernel(mod)) stop("sampler is not a valid kernel")
 
@@ -32,7 +40,7 @@ host_gibbs <- function(y, X, Phi, tau2 = "auto", n_iter = 1500, burn = 500,
 
   for (it in seq_len(n_iter)) {
     # beta | f, sigma^2
-    Vb <- solve(XtX / sigma2 + diag(p) / v_beta)
+    Vb <- solve(XtX / sigma2 + diag(1 / v_beta, nrow = p))
     Vb <- (Vb + t(Vb)) / 2
     mb <- as.vector(Vb %*% (crossprod(X, y - f) / sigma2))
     beta <- as.vector(mb + t(chol(Vb)) %*% rnorm(p))
