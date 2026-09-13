@@ -102,6 +102,32 @@ Three properties make that loop legitimate rather than merely convenient:
    `force = TRUE`. Silently producing wrong inference is the worst failure
    mode available here, so it is made loud.
 
+### Bringing your own features
+
+`bllnn_sampler()` takes any numeric matrix, so the network is not load-bearing
+for the contract. If you already have a feature map -- a `torch` model, a
+spline basis, random projections, a pre-trained body -- compute it and hand it
+over:
+
+```r
+Phi <- my_feature_map(z)            # n x m, whatever produced it
+mod <- bllnn_sampler(Phi, tau2 = "auto")
+```
+
+Everything downstream behaves identically; `is_valid_kernel()` is `TRUE` and
+the draw is the same exact conjugate one.
+
+What is **not** currently swappable is the cross-fitting path.
+`bllnn_crossfit()` calls the built-in network directly and takes no `fitter`
+argument, so cross-fitted features from your own model mean writing the fold
+loop, and the `E[x | z]` auxiliaries, yourself. If that matters to you, say so
+on the issue tracker -- it is a known gap rather than a decision.
+
+The built-in network is configurable in the usual ways: `width` takes a vector
+for arbitrary depth (`width = c(32, 16, 8)`), plus `activation`, `learn_rate`,
+`weight_decay`, `validation`, `patience` and `tune`. These pass through
+`bllnn_crossfit()` and `bllnn()` unchanged.
+
 ## Outcome families
 
 | `posterior =` | Valid Gibbs kernel | Use for |

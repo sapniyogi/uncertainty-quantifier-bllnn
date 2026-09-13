@@ -9,3 +9,4 @@
 ^~\$
 ^inst/validation/coverage_results\.rds$
 ^cran-comments\.md$
+^LICENSE\.md$
